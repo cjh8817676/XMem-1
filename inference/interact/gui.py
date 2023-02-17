@@ -11,7 +11,7 @@ In this repo, we don't have
 
 but with XMem as the backbone and is more memory (for both CPU and GPU) friendly
 """
-
+from numba import jit
 import functools
 from tqdm import tqdm
 import os
@@ -56,6 +56,37 @@ from alphapose.utils.webcam_detector import WebCamDetectionLoader
 from alphapose.utils.writer import DataWriter
 from alphapose.utils.writer import DataWriter
 from alphapose.utils.presets import SimpleTransform, SimpleTransform3DSMPL
+
+
+@jit(nopython=True)
+def get_bbox_from_mask(current_mask):
+    # print(current_mask.shape)
+    min_row = 2000
+    min_col = 2000
+    max_row = -1
+    max_col = -1
+    for row in range(0,len(current_mask)):
+        for col in range(0,len(current_mask[0])):
+            if (current_mask[row][col] != 0):
+                min_row = min(min_row,row)
+                min_col = min(min_col, col)
+                max_row = max(max_row,row)
+                max_col = max(max_col,col)
+    return min_col,min_row,max_col,max_row
+    # pdb.set_trace()
+    # 將辨識完的結果 處理完後丟到 Queue 裡面
+    # self.wait_and_put(self.det_queue, (orig_imgs[k], im_names[k], boxes_k, scores[dets[:, 0] == k], ids[dets[:, 0] == k], inps, cropped_boxes))
+    # if len(self.det_queue[self.cursur]) > 1:
+    #     self.det_queue[self.cursur] = []
+    # self.det_queue[self.cursur].append(self.current_image)
+    # self.det_queue[self.cursur].append(str(self.cursur) + '.jpg')
+    # self.det_queue[self.cursur].append(torch.from_numpy(np.array([[min_col,min_row,max_col,max_row]])))
+    # self.det_queue[self.cursur].append(torch.tensor([[1.]])) # bbox has no score , let it be a 100% accuracy
+    # self.det_queue[self.cursur].append(torch.tensor([[0.]])) # bbox has no ids 
+    # inps = torch.zeros(torch.from_numpy(np.array([[min_col,min_row,max_col,max_row]])).size(0), 3, *self._input_size)
+    # self.det_queue[self.cursur].append(inps) #
+    # cropped_boxes = torch.zeros(torch.from_numpy(np.array([[min_col,min_row,max_col,max_row]])).size(0), 4)
+    # self.det_queue[self.cursur].append(cropped_boxes) # bbox has no ids 
 
 class App(QWidget):
     def __init__(self, net: XMem, 
@@ -475,7 +506,22 @@ class App(QWidget):
                             self.overlay_layer, self.vis_target_objects)
         if self.cursur==0 or self.cursur==self.datalen-1:
             self.det_queue[self.cursur] = []
-        self.get_bbox_from_mask()  # 轉成bbox
+        # self.get_bbox_from_mask()  # 轉成bbox
+        # pdb.set_trace()
+        (min_col,min_row,max_col,max_row) = get_bbox_from_mask(self.current_mask)
+        # 將辨識完的結果 處理完後丟到 Queue 裡面
+        # self.wait_and_put(self.det_queue, (orig_imgs[k], im_names[k], boxes_k, scores[dets[:, 0] == k], ids[dets[:, 0] == k], inps, cropped_boxes))
+        if len(self.det_queue[self.cursur]) > 1:
+            self.det_queue[self.cursur] = []
+        self.det_queue[self.cursur].append(self.current_image)
+        self.det_queue[self.cursur].append(str(self.cursur) + '.jpg')
+        self.det_queue[self.cursur].append(torch.from_numpy(np.array([[min_col,min_row,max_col,max_row]])))
+        self.det_queue[self.cursur].append(torch.tensor([[1.]])) # bbox has no score , let it be a 100% accuracy
+        self.det_queue[self.cursur].append(torch.tensor([[0.]])) # bbox has no ids 
+        inps = torch.zeros(torch.from_numpy(np.array([[min_col,min_row,max_col,max_row]])).size(0), 3, *self._input_size)
+        self.det_queue[self.cursur].append(inps) #
+        cropped_boxes = torch.zeros(torch.from_numpy(np.array([[min_col,min_row,max_col,max_row]])).size(0), 4)
+        self.det_queue[self.cursur].append(cropped_boxes) # bbox has no ids
         
 
     def update_interact_vis(self):
@@ -676,7 +722,23 @@ class App(QWidget):
             self.current_mask = torch_prob_to_numpy_mask(self.current_prob) # 將模型輸出轉換成mask(Numpy)
 
             self.save_current_mask() # 將mask存成圖片 
-            self.get_bbox_from_mask()
+            # self.get_bbox_from_mask()
+            (min_col,min_row,max_col,max_row) = get_bbox_from_mask(self.current_mask)
+            # 將辨識完的結果 處理完後丟到 Queue 裡面
+            # self.wait_and_put(self.det_queue, (orig_imgs[k], im_names[k], boxes_k, scores[dets[:, 0] == k], ids[dets[:, 0] == k], inps, cropped_boxes))
+            if len(self.det_queue[self.cursur]) > 1:
+                self.det_queue[self.cursur] = []
+            self.det_queue[self.cursur].append(self.current_image)
+            self.det_queue[self.cursur].append(str(self.cursur) + '.jpg')
+            self.det_queue[self.cursur].append(torch.from_numpy(np.array([[min_col,min_row,max_col,max_row]])))
+            self.det_queue[self.cursur].append(torch.tensor([[1.]])) # bbox has no score , let it be a 100% accuracy
+            self.det_queue[self.cursur].append(torch.tensor([[0.]])) # bbox has no ids 
+            inps = torch.zeros(torch.from_numpy(np.array([[min_col,min_row,max_col,max_row]])).size(0), 3, *self._input_size)
+            self.det_queue[self.cursur].append(inps) #
+            cropped_boxes = torch.zeros(torch.from_numpy(np.array([[min_col,min_row,max_col,max_row]])).size(0), 4)
+            self.det_queue[self.cursur].append(cropped_boxes) # bbox has no ids 
+
+            
             self.show_current_frame(fast=True) # 更新畫面
 
             self.update_memory_size()
@@ -1017,32 +1079,32 @@ class App(QWidget):
     def on_save_visualization_toggle(self):
         self.save_visualization = self.save_visualization_checkbox.isChecked()
     
-    def get_bbox_from_mask(self):
-        min_row = 2000
-        min_col = 2000
-        max_row = -1
-        max_col = -1
-        for row in range(0,len(self.current_mask)):
-            for col in range(0,len(self.current_mask[0])):
-                if self.current_mask[row][col] != 0:
-                    min_row = min(min_row,row)
-                    min_col = min(min_col, col)
-                    max_row = max(max_row,row)
-                    max_col = max(max_col,col)
-        # pdb.set_trace()
-        # 將辨識完的結果 處理完後丟到 Queue 裡面
-        # self.wait_and_put(self.det_queue, (orig_imgs[k], im_names[k], boxes_k, scores[dets[:, 0] == k], ids[dets[:, 0] == k], inps, cropped_boxes))
-        if len(self.det_queue[self.cursur]) > 1:
-            self.det_queue[self.cursur] = []
-        self.det_queue[self.cursur].append(self.current_image)
-        self.det_queue[self.cursur].append(str(self.cursur) + '.jpg')
-        self.det_queue[self.cursur].append(torch.from_numpy(np.array([[min_col,min_row,max_col,max_row]])))
-        self.det_queue[self.cursur].append(torch.tensor([[1.]])) # bbox has no score , let it be a 100% accuracy
-        self.det_queue[self.cursur].append(torch.tensor([[0.]])) # bbox has no ids 
-        inps = torch.zeros(torch.from_numpy(np.array([[min_col,min_row,max_col,max_row]])).size(0), 3, *self._input_size)
-        self.det_queue[self.cursur].append(inps) #
-        cropped_boxes = torch.zeros(torch.from_numpy(np.array([[min_col,min_row,max_col,max_row]])).size(0), 4)
-        self.det_queue[self.cursur].append(cropped_boxes) # bbox has no ids 
+    # def get_bbox_from_mask(self):
+    #     min_row = 2000
+    #     min_col = 2000
+    #     max_row = -1
+    #     max_col = -1
+    #     for row in range(0,len(self.current_mask)):
+    #         for col in range(0,len(self.current_mask[0])):
+    #             if self.current_mask[row][col] != 0:
+    #                 min_row = min(min_row,row)
+    #                 min_col = min(min_col, col)
+    #                 max_row = max(max_row,row)
+    #                 max_col = max(max_col,col)
+    #     # pdb.set_trace()
+    #     # 將辨識完的結果 處理完後丟到 Queue 裡面
+    #     # self.wait_and_put(self.det_queue, (orig_imgs[k], im_names[k], boxes_k, scores[dets[:, 0] == k], ids[dets[:, 0] == k], inps, cropped_boxes))
+    #     if len(self.det_queue[self.cursur]) > 1:
+    #         self.det_queue[self.cursur] = []
+    #     self.det_queue[self.cursur].append(self.current_image)
+    #     self.det_queue[self.cursur].append(str(self.cursur) + '.jpg')
+    #     self.det_queue[self.cursur].append(torch.from_numpy(np.array([[min_col,min_row,max_col,max_row]])))
+    #     self.det_queue[self.cursur].append(torch.tensor([[1.]])) # bbox has no score , let it be a 100% accuracy
+    #     self.det_queue[self.cursur].append(torch.tensor([[0.]])) # bbox has no ids 
+    #     inps = torch.zeros(torch.from_numpy(np.array([[min_col,min_row,max_col,max_row]])).size(0), 3, *self._input_size)
+    #     self.det_queue[self.cursur].append(inps) #
+    #     cropped_boxes = torch.zeros(torch.from_numpy(np.array([[min_col,min_row,max_col,max_row]])).size(0), 4)
+    #     self.det_queue[self.cursur].append(cropped_boxes) # bbox has no ids 
     
     def pose_estimate(self):
         mode = 'video'
