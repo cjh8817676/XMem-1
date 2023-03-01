@@ -6,6 +6,7 @@ import torch
 import torch.nn.functional as F
 from util.palette import davis_palette
 from dataset.range_transform import im_normalization
+from matplotlib import pyplot as plt
 
 def image_to_torch(frame: np.ndarray, device='cuda'):
     # frame: H*W*3 numpy array
@@ -79,7 +80,7 @@ def overlay_davis(image, mask, alpha=0.5, fade=False):
 
     colored_mask = color_map_np[mask]
     foreground = image*alpha + (1-alpha)*colored_mask
-    binary_mask = (mask > 0)
+    binary_mask = (mask > 0) # record mask exist on pixel of origin image
     # Compose image
     im_overlay[binary_mask] = foreground[binary_mask]
     if fade:

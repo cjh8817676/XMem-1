@@ -31,7 +31,7 @@ from PyQt5.QtGui import QPixmap, QKeySequence, QImage, QTextCursor, QIcon
 from PyQt5.QtCore import Qt, QTimer
 from torchvision.ops import masks_to_boxes
 from model.network import XMem
-
+import matplotlib.pyplot as plt
 from inference.inference_core import InferenceCore
 from .s2m_controller import S2MController
 from .fbrs_controller import FBRSController
@@ -65,31 +65,22 @@ def get_bbox_from_mask(current_mask):
     min_col = 2000
     max_row = -1
     max_col = -1
-    for row in range(0,len(current_mask)):
-        for col in range(0,len(current_mask[0])):
-            if (current_mask[row][col] != 0):
+    for row in range(0,len(current_mask)):  # num of row (h)
+        for col in range(0,len(current_mask[0])):  # num of col (w)
+            if (current_mask[row][col] == 1):
                 min_row = min(min_row,row)
                 min_col = min(min_col, col)
                 max_row = max(max_row,row)
                 max_col = max(max_col,col)
+    min_col = min_col - 5 if min_col - 5 > 0 else min_col 
+    min_row = min_row - 5 if min_row - 5 > 0 else min_row
+    
+    max_row = max_row + 5 if max_row + 5 < len(current_mask) else max_row
+    max_col = max_col + 5 if max_col + 5 < len(current_mask[0]) else max_col
     return min_col,min_row,max_col,max_row
-    # pdb.set_trace()
-    # 將辨識完的結果 處理完後丟到 Queue 裡面
-    # self.wait_and_put(self.det_queue, (orig_imgs[k], im_names[k], boxes_k, scores[dets[:, 0] == k], ids[dets[:, 0] == k], inps, cropped_boxes))
-    # if len(self.det_queue[self.cursur]) > 1:
-    #     self.det_queue[self.cursur] = []
-    # self.det_queue[self.cursur].append(self.current_image)
-    # self.det_queue[self.cursur].append(str(self.cursur) + '.jpg')
-    # self.det_queue[self.cursur].append(torch.from_numpy(np.array([[min_col,min_row,max_col,max_row]])))
-    # self.det_queue[self.cursur].append(torch.tensor([[1.]])) # bbox has no score , let it be a 100% accuracy
-    # self.det_queue[self.cursur].append(torch.tensor([[0.]])) # bbox has no ids 
-    # inps = torch.zeros(torch.from_numpy(np.array([[min_col,min_row,max_col,max_row]])).size(0), 3, *self._input_size)
-    # self.det_queue[self.cursur].append(inps) #
-    # cropped_boxes = torch.zeros(torch.from_numpy(np.array([[min_col,min_row,max_col,max_row]])).size(0), 4)
-    # self.det_queue[self.cursur].append(cropped_boxes) # bbox has no ids 
 
-class App(QWidget):
-    def __init__(self, net: XMem, 
+class App(QWidget):  # net : XMem -> 表示net一定是XMem物件
+    def __init__(self, net: XMem,   
                 resource_manager: ResourceManager, 
                 s2m_ctrl:S2MController, 
                 fbrs_ctrl:FBRSController, config,args, cfg,queueSize=128):
@@ -388,12 +379,13 @@ class App(QWidget):
         pose_queue: the buffer storing post-processed cropped human image for pose estimation
         """
         # 將mask轉換成bbox，存入該
-        self.det_queue = [ [] for i in range(self.num_frames)]
+        self.det_queue = [ [] for i in range(self.num_frames+1)] # 最後全None
         self.pose_queue = Queue(maxsize=self.num_frames * 10)
         
         # timer to play video
         self.timer = QTimer()
         self.timer.setSingleShot(False)
+        self.timer.timeout.connect(self.on_play_video_timer)
 
         # timer to update GPU usage
         self.gpu_timer = QTimer()
@@ -447,7 +439,7 @@ class App(QWidget):
         # try to load the default overlay
         # self._try_load_layer('./docs/ECCV-logo.png')
  
-        self.load_current_image_mask() # read cursor and load mask
+        self.load_current_image_mask() # read image and load mask
         self.show_current_frame()      # read cursor and render image on gui.
         self.show()                    # show
 
@@ -510,7 +502,8 @@ class App(QWidget):
         # pdb.set_trace()
         (min_col,min_row,max_col,max_row) = get_bbox_from_mask(self.current_mask)
         # 將辨識完的結果 處理完後丟到 Queue 裡面
-        # self.wait_and_put(self.det_queue, (orig_imgs[k], im_names[k], boxes_k, scores[dets[:, 0] == k], ids[dets[:, 0] == k], inps, cropped_boxes))
+        
+    
         if len(self.det_queue[self.cursur]) > 1:
             self.det_queue[self.cursur] = []
         self.det_queue[self.cursur].append(self.current_image)
@@ -523,20 +516,23 @@ class App(QWidget):
         cropped_boxes = torch.zeros(torch.from_numpy(np.array([[min_col,min_row,max_col,max_row]])).size(0), 4)
         self.det_queue[self.cursur].append(cropped_boxes) # bbox has no ids
         
-
     def update_interact_vis(self):
         # Update the interactions without re-computing the overlay
+        pdb.set_trace()
         height, width, channel = self.viz.shape # self.viz: 顯示在canva上的物件
         bytesPerLine = 3 * width
-
-        vis_map = self.vis_map
-        vis_alpha = self.vis_alpha
-        brush_vis_map = self.brush_vis_map
-        brush_vis_alpha = self.brush_vis_alpha
-        # self.viz_with_stroke: 'numpy.ndarray'
+        # 底下的部分為人機互動造成顯示的變化
+        vis_map = self.vis_map                          # click 產生出的mask
+        vis_alpha = self.vis_alpha                      # alpha: 一種係數
+        brush_vis_map = self.brush_vis_map              # 筆畫(brush) 產生出的mask
+        brush_vis_alpha = self.brush_vis_alpha          # alpha: 一種係數
+        # alpha:  blending coefficient slider adjusts the intensity of all predicted masks.
+        # 詳情請看 : https://github.com/SamsungLabs/fbrs_interactive_segmentation
+        # self.viz_with_stroke: 'numpy.ndarray' stroke: 筆刷之意
         self.viz_with_stroke = self.viz*(1-vis_alpha) + vis_map*vis_alpha
         self.viz_with_stroke = self.viz_with_stroke*(1-brush_vis_alpha) + brush_vis_map*brush_vis_alpha
         self.viz_with_stroke = self.viz_with_stroke.astype(np.uint8)
+        # self.viz_with_stroke: 人機互動的結果
         # 顯示的圖(self.viz_with_stroke.data)已計算出，放入QImage物件來顯示
         qImg = QImage(self.viz_with_stroke.data, width, height, bytesPerLine, QImage.Format_RGB888) # 
         self.main_canvas.setPixmap(QPixmap(qImg.scaled(self.main_canvas.size(),    # canvas 的顯示
@@ -579,8 +575,8 @@ class App(QWidget):
         if fast:
             self.update_current_image_fast()
         else:
-            self.compose_current_im()          # 計算出要顯示的圖片(mask和overlay等....) 之後把mask轉成bbox儲存到detqueue
-            self.update_interact_vis()         # 將計算出的圖片，顯示在main_canva
+            self.compose_current_im()          # 計算出要顯示的圖片(原圖與mask進行overlay),之後把mask轉成bbox儲存到detqueue
+            self.update_interact_vis()         # 人機互動後的結果,計算出的圖片，顯示在main_canva
             self.update_minimap()              # 小圖片的更新
 
         self.lcd.setText('{: 3d} / {: 3d}'.format(self.cursur, self.num_frames-1))
@@ -645,7 +641,7 @@ class App(QWidget):
         # save mask to hard disk
         self.res_man.save_mask(self.cursur, self.current_mask)
 
-    def tl_slide(self):
+    def tl_slide(self):  # slider 數值變化
         # if we are propagating, the on_run function will take care of everything
         # don't do duplicate work here
         if not self.propagating:
@@ -738,7 +734,6 @@ class App(QWidget):
             cropped_boxes = torch.zeros(torch.from_numpy(np.array([[min_col,min_row,max_col,max_row]])).size(0), 4)
             self.det_queue[self.cursur].append(cropped_boxes) # bbox has no ids 
 
-            
             self.show_current_frame(fast=True) # 更新畫面
 
             self.update_memory_size()
@@ -765,23 +760,47 @@ class App(QWidget):
         self.cursur = max(0, self.cursur-1) # cursor 決定第幾幀
         self.tl_slider.setValue(self.cursur)
 
-    def on_next_frame(self):  # 決定下一幀
+    def on_next_frame(self):  # 移至下一幀
         # self.tl_slide will trigger on setValue
         self.cursur = min(self.cursur+1, self.num_frames-1)
         self.tl_slider.setValue(self.cursur)
 
     def on_play_video_timer(self):
+        self.load_current_image_mask(no_mask=True) # 然後讀取該cursor的圖片與mask. mask不一定存在
+        self.load_current_torch_image_mask(no_mask=True) #將圖片(Numpy)轉成張量(Tensor)
+        # pdb.set_trace()
+        # self.get_bbox_from_mask()
+        (min_col,min_row,max_col,max_row) = get_bbox_from_mask(self.current_mask)
+        # 將辨識完的結果 處理完後丟到 Queue 裡面
+        # self.wait_and_put(self.det_queue, (orig_imgs[k], im_names[k], boxes_k, scores[dets[:, 0] == k], ids[dets[:, 0] == k], inps, cropped_boxes))
+        if len(self.det_queue[self.cursur]) > 1:
+            self.det_queue[self.cursur] = []
+        self.det_queue[self.cursur].append(self.current_image)
+        self.det_queue[self.cursur].append(str(self.cursur) + '.jpg')
+        self.det_queue[self.cursur].append(torch.from_numpy(np.array([[min_col,min_row,max_col,max_row]])))
+        self.det_queue[self.cursur].append(torch.tensor([[1.]])) # bbox has no score , let it be a 100% accuracy
+        self.det_queue[self.cursur].append(torch.tensor([[0.]])) # bbox has no ids 
+        inps = torch.zeros(torch.from_numpy(np.array([[min_col,min_row,max_col,max_row]])).size(0), 3, *self._input_size)
+        self.det_queue[self.cursur].append(inps) #
+        cropped_boxes = torch.zeros(torch.from_numpy(np.array([[min_col,min_row,max_col,max_row]])).size(0), 4)
+        self.det_queue[self.cursur].append(cropped_boxes) # bbox has no ids 
         self.cursur += 1
         if self.cursur > self.num_frames-1:
             self.cursur = 0
         self.tl_slider.setValue(self.cursur)
-
+        if self.cursur > self.num_frames-1:
+            self.cursur = 0
+        # if self.cursur == self.num_frames - 1:
+        #     self.console_push_text('play stop.')
+        #     self.timer.stop()
+        
+        
     def on_play_video(self):
         if self.timer.isActive():
             self.timer.stop()
             self.play_button.setText('Play Video')
         else:
-            self.timer.start(1000 / 30)
+            self.timer.start(1000 / 30)   # active timer to umplement on_play_video_timer
             self.play_button.setText('Stop Video')
 
     def on_reset_mask(self):
@@ -1079,34 +1098,8 @@ class App(QWidget):
     def on_save_visualization_toggle(self):
         self.save_visualization = self.save_visualization_checkbox.isChecked()
     
-    # def get_bbox_from_mask(self):
-    #     min_row = 2000
-    #     min_col = 2000
-    #     max_row = -1
-    #     max_col = -1
-    #     for row in range(0,len(self.current_mask)):
-    #         for col in range(0,len(self.current_mask[0])):
-    #             if self.current_mask[row][col] != 0:
-    #                 min_row = min(min_row,row)
-    #                 min_col = min(min_col, col)
-    #                 max_row = max(max_row,row)
-    #                 max_col = max(max_col,col)
-    #     # pdb.set_trace()
-    #     # 將辨識完的結果 處理完後丟到 Queue 裡面
-    #     # self.wait_and_put(self.det_queue, (orig_imgs[k], im_names[k], boxes_k, scores[dets[:, 0] == k], ids[dets[:, 0] == k], inps, cropped_boxes))
-    #     if len(self.det_queue[self.cursur]) > 1:
-    #         self.det_queue[self.cursur] = []
-    #     self.det_queue[self.cursur].append(self.current_image)
-    #     self.det_queue[self.cursur].append(str(self.cursur) + '.jpg')
-    #     self.det_queue[self.cursur].append(torch.from_numpy(np.array([[min_col,min_row,max_col,max_row]])))
-    #     self.det_queue[self.cursur].append(torch.tensor([[1.]])) # bbox has no score , let it be a 100% accuracy
-    #     self.det_queue[self.cursur].append(torch.tensor([[0.]])) # bbox has no ids 
-    #     inps = torch.zeros(torch.from_numpy(np.array([[min_col,min_row,max_col,max_row]])).size(0), 3, *self._input_size)
-    #     self.det_queue[self.cursur].append(inps) #
-    #     cropped_boxes = torch.zeros(torch.from_numpy(np.array([[min_col,min_row,max_col,max_row]])).size(0), 4)
-    #     self.det_queue[self.cursur].append(cropped_boxes) # bbox has no ids 
-    
     def pose_estimate(self):
+        # pdb.set_trace()
         mode = 'video'
         self.image_postprocess()
         # pdb.set_trace()
@@ -1154,7 +1147,12 @@ class App(QWidget):
             sys.stdout.flush()
             im_names_desc = tqdm(self.loop())
         else:
-            data_length = len(self.det_queue)
+            data_length=0
+            # data_length = len(self.det_queue)
+            for i in self.det_queue:
+                if i == []:
+                    continue
+                data_length += 1
             im_names_desc = tqdm(range(data_length), dynamic_ncols=True)
         # pdb.set_trace()
         batchSize = self.args.posebatch
@@ -1251,11 +1249,16 @@ class App(QWidget):
 
     def image_postprocess(self):
         # pdb.set_trace()  # use it when debug mode
+        det_data = []
+        for i in self.det_queue:                      # 將每個frame物件偵測的結果從 det_queue 取出。
+            if len(i) != 0 :
+                det_data.append(i)
+        # pdb.set_trace()  # use it when debug mode
         # self.det_queue.pop(0)
-        for i in range(self.datalen):
+        for i in range(len(det_data)):
             with torch.no_grad():
                 print(i)
-                (orig_img, im_name, boxes, scores, ids, inps, cropped_boxes) = self.det_queue[i] # 將每個frame物件偵測的結果從 det_queue 取出。
+                (orig_img, im_name, boxes, scores, ids, inps, cropped_boxes) = det_data.pop(0)
                 if orig_img is None:        # frame 抽完結束
                     self.pose_queue.put(None, None, None, None, None, None, None)
                     return
