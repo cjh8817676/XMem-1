@@ -18,7 +18,7 @@ from inference.interact.fbrs_controller import FBRSController
 from inference.interact.s2m.s2m_network import deeplabv3plus_resnet50 as S2M
 
 from PyQt5.QtWidgets import QApplication
-from inference.interact.gui_origin import App
+from inference.interact.gui import App
 from inference.interact.resource_manager import ResourceManager
 
 torch.set_grad_enabled(False)

@@ -1,3 +1,5 @@
+# -*- coding: utf-8 -*-
+
 """
 Based on https://github.com/hkchengrex/MiVOS/tree/MiVOS-STCN 
 (which is based on https://github.com/seoungwugoh/ivs-demo)
@@ -11,26 +13,27 @@ In this repo, we don't have
 
 but with XMem as the backbone and is more memory (for both CPU and GPU) friendly
 """
-
+from numba import jit
 import functools
-
+from tqdm import tqdm
 import os
 import cv2
+import sys
 # fix conflicts between qt5 and cv2
 os.environ.pop("QT_QPA_PLATFORM_PLUGIN_PATH")
 
 import numpy as np
 import torch
-
+from queue import Queue
 from PyQt5.QtWidgets import (QWidget, QApplication, QComboBox, QCheckBox,
     QHBoxLayout, QLabel, QPushButton, QTextEdit, QSpinBox, QFileDialog,
     QPlainTextEdit, QVBoxLayout, QSizePolicy, QButtonGroup, QSlider, QShortcut, QRadioButton)
-
+import pdb
 from PyQt5.QtGui import QPixmap, QKeySequence, QImage, QTextCursor, QIcon
 from PyQt5.QtCore import Qt, QTimer
-
+from torchvision.ops import masks_to_boxes
 from model.network import XMem
-
+import matplotlib.pyplot as plt
 from inference.inference_core import InferenceCore
 from .s2m_controller import S2MController
 from .fbrs_controller import FBRSController
@@ -40,25 +43,106 @@ from .interaction import *
 from .resource_manager import ResourceManager
 from .gui_utils import *
 
+sys.path.insert(0,'/home/m11002125/ViTPose/')
+from mmpose.apis import (inference_top_down_pose_model, init_pose_model,
+                         process_mmdet_results, vis_pose_result)
+from mmpose.datasets import DatasetInfo
 
-class App(QWidget):
-    def __init__(self, net: XMem, 
+try:
+    from mmdet.apis import inference_detector, init_detector
+    has_mmdet = True
+except (ImportError, ModuleNotFoundError):
+    has_mmdet = False
+
+
+
+@jit(nopython=True)
+def get_bbox_from_mask(current_mask):
+    
+    # print(current_mask.shape)
+    min_row = 2000
+    min_col = 2000
+    max_row = -1
+    max_col = -1
+    for row in range(0,len(current_mask)):  # num of row (h)
+        for col in range(0,len(current_mask[0])):  # num of col (w)
+            if (current_mask[row][col] == 1):
+                min_row = min(min_row,row)
+                min_col = min(min_col, col)
+                max_row = max(max_row,row)
+                max_col = max(max_col,col)
+    min_col = min_col - 5 if min_col - 5 > 0 else min_col 
+    min_row = min_row - 5 if min_row - 5 > 0 else min_row
+    
+    max_row = max_row + 5 if max_row + 5 < len(current_mask) else max_row
+    max_col = max_col + 5 if max_col + 5 < len(current_mask[0]) else max_col
+    return min_col,min_row,max_col,max_row
+
+class App(QWidget):  # net : XMem -> 表示net一定是XMem物件
+    def __init__(self, net: XMem,   
                 resource_manager: ResourceManager, 
                 s2m_ctrl:S2MController, 
-                fbrs_ctrl:FBRSController, config):
+                fbrs_ctrl:FBRSController, config, pose_config):
         super().__init__()
-
+        self.video_path = config['video_path']
+        stream = cv2.VideoCapture(self.video_path) # 將影片檔案讀入
+        assert stream.isOpened(), 'Cannot capture source'
+        self.path = self.video_path                               # 影片路徑
+        self.datalen = int(stream.get(cv2.CAP_PROP_FRAME_COUNT)) # 查看多少個frame
+        self.fourcc = int(stream.get(cv2.CAP_PROP_FOURCC))       # fourcc:  編碼的種類 EX:(MPEG4 or H264)
+        self.fps = stream.get(cv2.CAP_PROP_FPS)                  # 查看 FPS
+        self.frameSize = (int(stream.get(cv2.CAP_PROP_FRAME_WIDTH)), int(stream.get(cv2.CAP_PROP_FRAME_HEIGHT))) # 影片長寬
+        # self.videoinfo = {'fourcc': self.fourcc, 'fps': self.fps, 'frameSize': self.frameSize} # 影片資訊
+        stream.release()
         self.initialized = False
         self.num_objects = config['num_objects']
         self.s2m_controller = s2m_ctrl
-        self.fbrs_controller = fbrs_ctrl
-        self.config = config
-        self.processor = InferenceCore(net, config)
-        self.processor.set_all_labels(list(range(1, self.num_objects+1)))
-        self.res_man = resource_manager
-
-        self.num_frames = len(self.res_man)
-        self.height, self.width = self.res_man.h, self.res_man.w
+        self.fbrs_controller = fbrs_ctrl 
+        self.pose_config = pose_config # pose dataset configuration
+        self.config = config   # XMem config
+        self.batchSize = 1
+        # pdb.set_trace()
+        self.device = self.config['device']
+        leftover = 0
+        
+        if (self.datalen) % self.batchSize:
+            leftover = 1
+        self.num_batches = self.datalen // self.batchSize + leftover
+        
+        # pdb.set_trace()
+        # pose_model
+        self.pose_model = init_pose_model(pose_config.pose_config, pose_config.pose_checkpoint, device=pose_config.device.lower())
+        
+        self.dataset = self.pose_model.cfg.data['test']['type']
+        self.dataset_info = self.pose_model.cfg.data['test'].get('dataset_info', None)
+        if self.dataset_info is None:
+            warnings.warn(
+                'Please set `dataset_info` in the config.'
+                'Check https://github.com/open-mmlab/mmpose/pull/663 for details.',
+                DeprecationWarning)
+        else:
+            self.dataset_info = DatasetInfo(self.dataset_info)
+                
+        # pdb.set_trace()
+        self._input_size = self.pose_model.cfg.data_cfg.image_size          # 預設 姿態偵測模型的輸入維度
+        self._output_size = self.pose_model.cfg.data_cfg.heatmap_size       # 預設 姿態偵測模型的輸出維度
+        
+        
+        self.processor = InferenceCore(net, config)                         # XMem 模型本體
+        self.processor.set_all_labels(list(range(1, self.num_objects+1)))   # 決定追蹤的物體數
+        
+        '''resource_manager:
+            控制跟影片讀取寫出相關事項
+            Ex: 
+                1. mask的輸出路徑
+                2. 影像的資訊紀錄
+                3. 取得已輸出過的mask
+        '''
+        self.res_man = resource_manager 
+        self.num_frames = len(self.res_man) # 影像總幀數
+        # resource_manager，可以控制影像輸入的大小，若是輸入的影像太大，我們會將它縮小，因為高畫質的計算量太重。
+        self.height, self.width = self.res_man.h, self.res_man.w  
+        self.videoinfo = {'fourcc': self.fourcc, 'fps': self.fps, 'frameSize': (self.width,self.height)} # 影片資訊
 
         # set window
         self.setWindowTitle('XMem Demo')
@@ -81,6 +165,9 @@ class App(QWidget):
 
         self.reset_button = QPushButton('Reset Frame')
         self.reset_button.clicked.connect(self.on_reset_mask)
+        
+        self.pose_button = QPushButton('Pose Estimation')
+        self.pose_button.clicked.connect(self.pose_estimate)
 
         # LCD
         self.lcd = QTextEdit()
@@ -147,7 +234,7 @@ class App(QWidget):
         self.main_canvas.setAlignment(Qt.AlignCenter)
         self.main_canvas.setMinimumSize(100, 100)
 
-        self.main_canvas.mousePressEvent = self.on_mouse_press
+        self.main_canvas.mousePressEvent = self.on_mouse_press  # 滑鼠點擊
         self.main_canvas.mouseMoveEvent = self.on_mouse_motion
         self.main_canvas.setMouseTracking(True) # Required for all-time tracking
         self.main_canvas.mouseReleaseEvent = self.on_mouse_release
@@ -174,8 +261,8 @@ class App(QWidget):
         self.gpu_mem_gauge, self.gpu_mem_gauge_layout = create_gauge('GPU mem. (all processes, w/ caching)')
         self.torch_mem_gauge, self.torch_mem_gauge_layout = create_gauge('GPU mem. (used by torch, w/o caching)')
 
-        self.update_memory_size()
-        self.update_gpu_usage()
+        self.update_memory_size()   # 
+        self.update_gpu_usage()     # 更新GPU顯存使用狀況
 
         self.work_mem_min, self.work_mem_min_layout = create_parameter_box(1, 100, 'Min. working memory frames', 
                                                         callback=self.on_work_min_change)
@@ -236,6 +323,7 @@ class App(QWidget):
         navi.addWidget(self.commit_button)
         navi.addWidget(self.forward_run_button)
         navi.addWidget(self.backward_run_button)
+        navi.addWidget(self.pose_button)
 
         # Drawing area, main canvas and minimap
         draw_area = QHBoxLayout()
@@ -285,10 +373,20 @@ class App(QWidget):
         layout.addWidget(self.tl_slider)
         layout.addLayout(navi)
         self.setLayout(layout)
-
+        
+        '''--------------------function region ------------------------'''
+        """
+        det_queue: the buffer storing human detection results from mask
+        pose_queue: the buffer storing post-processed cropped human image for pose estimation
+        """
+        # 將mask轉換成bbox，存入該
+        self.det_queue = [ [] for i in range(self.num_frames+1)] # 最後全None
+        self.pose_queue = Queue(maxsize=self.num_frames * 10)
+        
         # timer to play video
         self.timer = QTimer()
         self.timer.setSingleShot(False)
+        self.timer.timeout.connect(self.on_play_video_timer)
 
         # timer to update GPU usage
         self.gpu_timer = QTimer()
@@ -340,23 +438,23 @@ class App(QWidget):
         # the object id used for popup/layered overlay
         self.vis_target_objects = [1]
         # try to load the default overlay
-        self._try_load_layer('./docs/ECCV-logo.png')
+        # self._try_load_layer('./docs/ECCV-logo.png')
  
-        self.load_current_image_mask()
-        self.show_current_frame()
-        self.show()
+        self.load_current_image_mask() # read image and load mask
+        self.show_current_frame()      # read cursor and render image on gui.
+        self.show()                    # show
 
         self.console_push_text('Initialized.')
         self.initialized = True
 
-    def resizeEvent(self, event):
+    def resizeEvent(self, event):      # 實際開始顯示，GUI的顯示
         self.show_current_frame()
 
-    def console_push_text(self, text):
+    def console_push_text(self, text):           # console
         self.console.moveCursor(QTextCursor.End)
         self.console.insertPlainText(text+'\n')
 
-    def interaction_radio_clicked(self, event):
+    def interaction_radio_clicked(self, event):  # radio button
         self.last_interaction = self.curr_interaction
         if self.radio_s2m.isChecked():
             self.curr_interaction = 'Scribble'
@@ -376,13 +474,14 @@ class App(QWidget):
             self.commit_button.setEnabled(False)
 
     def load_current_image_mask(self, no_mask=False):
-        self.current_image = self.res_man.get_image(self.cursur)
+        # pdb.set_trace()
+        self.current_image = self.res_man.get_image(self.cursur) # cursor 決定第幾幀 # 讀取圖片
         self.current_image_torch = None
 
         if not no_mask:
-            loaded_mask = self.res_man.get_mask(self.cursur)
+            loaded_mask = self.res_man.get_mask(self.cursur) # 某影片第一次執行時，一開始沒有mask。
             if loaded_mask is None:
-                self.current_mask.fill(0)
+                self.current_mask.fill(0)                    # 將Mask先填滿0
             else:
                 self.current_mask = loaded_mask.copy()
             self.current_prob = None
@@ -395,25 +494,49 @@ class App(QWidget):
             self.current_prob = index_numpy_to_one_hot_torch(self.current_mask, self.num_objects+1).cuda()
 
     def compose_current_im(self):
+        # self.viz: 顯示在canva上的內容
         self.viz = get_visualization(self.viz_mode, self.current_image, self.current_mask, 
                             self.overlay_layer, self.vis_target_objects)
-
+        if self.cursur==0 or self.cursur==self.datalen-1:
+            self.det_queue[self.cursur] = []
+        # self.get_bbox_from_mask()  # 轉成bbox
+        # pdb.set_trace()
+        (min_col,min_row,max_col,max_row) = get_bbox_from_mask(self.current_mask)
+        # 將辨識完的結果 處理完後丟到 Queue 裡面
+        
+    
+        if len(self.det_queue[self.cursur]) > 1:
+            self.det_queue[self.cursur] = []
+        self.det_queue[self.cursur].append(self.current_image)
+        self.det_queue[self.cursur].append(str(self.cursur) + '.jpg')
+        self.det_queue[self.cursur].append(torch.from_numpy(np.array([[min_col,min_row,max_col,max_row]])))
+        self.det_queue[self.cursur].append(torch.tensor([[1.]])) # bbox has no score , let it be a 100% accuracy
+        self.det_queue[self.cursur].append(torch.tensor([[0.]])) # bbox has no ids 
+        inps = torch.zeros(torch.from_numpy(np.array([[min_col,min_row,max_col,max_row]])).size(0), 3, *self._input_size)
+        self.det_queue[self.cursur].append(inps) #
+        cropped_boxes = torch.zeros(torch.from_numpy(np.array([[min_col,min_row,max_col,max_row]])).size(0), 4)
+        self.det_queue[self.cursur].append(cropped_boxes) # bbox has no ids
+        
     def update_interact_vis(self):
         # Update the interactions without re-computing the overlay
-        height, width, channel = self.viz.shape
+        # pdb.set_trace()
+        height, width, channel = self.viz.shape # self.viz: 顯示在canva上的物件
         bytesPerLine = 3 * width
-
-        vis_map = self.vis_map
-        vis_alpha = self.vis_alpha
-        brush_vis_map = self.brush_vis_map
-        brush_vis_alpha = self.brush_vis_alpha
-
+        # 底下的部分為人機互動造成顯示的變化
+        vis_map = self.vis_map                          # click 產生出的mask
+        vis_alpha = self.vis_alpha                      # alpha: 一種係數
+        brush_vis_map = self.brush_vis_map              # 筆畫(brush) 產生出的mask
+        brush_vis_alpha = self.brush_vis_alpha          # alpha: 一種係數
+        # alpha:  blending coefficient slider adjusts the intensity of all predicted masks.
+        # 詳情請看 : https://github.com/SamsungLabs/fbrs_interactive_segmentation
+        # self.viz_with_stroke: 'numpy.ndarray' stroke: 筆刷之意
         self.viz_with_stroke = self.viz*(1-vis_alpha) + vis_map*vis_alpha
         self.viz_with_stroke = self.viz_with_stroke*(1-brush_vis_alpha) + brush_vis_map*brush_vis_alpha
         self.viz_with_stroke = self.viz_with_stroke.astype(np.uint8)
-
-        qImg = QImage(self.viz_with_stroke.data, width, height, bytesPerLine, QImage.Format_RGB888)
-        self.main_canvas.setPixmap(QPixmap(qImg.scaled(self.main_canvas.size(),
+        # self.viz_with_stroke: 人機互動的結果
+        # 顯示的圖(self.viz_with_stroke.data)已計算出，放入QImage物件來顯示
+        qImg = QImage(self.viz_with_stroke.data, width, height, bytesPerLine, QImage.Format_RGB888) # 
+        self.main_canvas.setPixmap(QPixmap(qImg.scaled(self.main_canvas.size(),    # canvas 的顯示
                 Qt.KeepAspectRatio, Qt.FastTransformation)))
 
         self.main_canvas_size = self.main_canvas.size()
@@ -435,6 +558,7 @@ class App(QWidget):
 
     def update_current_image_fast(self):
         # fast path, uses gpu. Changes the image in-place to avoid copying
+        # self.viz: 顯示在canva上的物件
         self.viz = get_visualization_torch(self.viz_mode, self.current_image_torch_no_norm, 
                     self.current_prob, self.overlay_layer_torch, self.vis_target_objects)
         if self.save_visualization:
@@ -452,9 +576,9 @@ class App(QWidget):
         if fast:
             self.update_current_image_fast()
         else:
-            self.compose_current_im()
-            self.update_interact_vis()
-            self.update_minimap()
+            self.compose_current_im()          # 計算出要顯示的圖片(原圖與mask進行overlay),之後把mask轉成bbox儲存到detqueue
+            self.update_interact_vis()         # 人機互動後的結果,計算出的圖片，顯示在main_canva
+            self.update_minimap()              # 小圖片的更新
 
         self.lcd.setText('{: 3d} / {: 3d}'.format(self.cursur, self.num_frames-1))
         self.tl_slider.setValue(self.cursur)
@@ -518,7 +642,7 @@ class App(QWidget):
         # save mask to hard disk
         self.res_man.save_mask(self.cursur, self.current_mask)
 
-    def tl_slide(self):
+    def tl_slide(self):  # slider 數值變化
         # if we are propagating, the on_run function will take care of everything
         # don't do duplicate work here
         if not self.propagating:
@@ -585,17 +709,33 @@ class App(QWidget):
         self.propagating = True
         self.clear_mem_button.setEnabled(False)
         # propagate till the end
-        while self.propagating:
-            self.propagate_fn()
+        while self.propagating:  
+            self.propagate_fn()  # 調整cursor 與 slider 的數值
 
-            self.load_current_image_mask(no_mask=True)
-            self.load_current_torch_image_mask(no_mask=True)
+            self.load_current_image_mask(no_mask=True) # 上一行程式已經更新cursor了,然後讀取該cursor的圖片與mask. mask不一定存在
+            self.load_current_torch_image_mask(no_mask=True) #將圖片(Numpy)轉成張量(Tensor)
 
-            self.current_prob = self.processor.step(self.current_image_torch)
-            self.current_mask = torch_prob_to_numpy_mask(self.current_prob)
+            self.current_prob = self.processor.step(self.current_image_torch) # 將新張量(Tensor)丟入XMem模型,得到current_prob(輸出)
+            self.current_mask = torch_prob_to_numpy_mask(self.current_prob) # 將模型輸出轉換成mask(Numpy)
 
-            self.save_current_mask()
-            self.show_current_frame(fast=True)
+            self.save_current_mask() # 將mask存成圖片 
+            # self.get_bbox_from_mask()
+            (min_col,min_row,max_col,max_row) = get_bbox_from_mask(self.current_mask)
+            # 將辨識完的結果 處理完後丟到 Queue 裡面
+            # self.wait_and_put(self.det_queue, (orig_imgs[k], im_names[k], boxes_k, scores[dets[:, 0] == k], ids[dets[:, 0] == k], inps, cropped_boxes))
+            if len(self.det_queue[self.cursur]) > 1:
+                self.det_queue[self.cursur] = []
+            self.det_queue[self.cursur].append(self.current_image)
+            self.det_queue[self.cursur].append(str(self.cursur) + '.jpg')
+            self.det_queue[self.cursur].append(torch.from_numpy(np.array([[min_col,min_row,max_col,max_row]])))
+            self.det_queue[self.cursur].append(torch.tensor([[1.]])) # bbox has no score , let it be a 100% accuracy
+            self.det_queue[self.cursur].append(torch.tensor([[0.]])) # bbox has no ids 
+            inps = torch.zeros(torch.from_numpy(np.array([[min_col,min_row,max_col,max_row]])).size(0), 3, *self._input_size)
+            self.det_queue[self.cursur].append(inps) #
+            cropped_boxes = torch.zeros(torch.from_numpy(np.array([[min_col,min_row,max_col,max_row]])).size(0), 4)
+            self.det_queue[self.cursur].append(cropped_boxes) # bbox has no ids 
+
+            self.show_current_frame(fast=True) # 更新畫面
 
             self.update_memory_size()
             QApplication.processEvents()
@@ -618,26 +758,50 @@ class App(QWidget):
 
     def on_prev_frame(self):
         # self.tl_slide will trigger on setValue
-        self.cursur = max(0, self.cursur-1)
+        self.cursur = max(0, self.cursur-1) # cursor 決定第幾幀
         self.tl_slider.setValue(self.cursur)
 
-    def on_next_frame(self):
+    def on_next_frame(self):  # 移至下一幀
         # self.tl_slide will trigger on setValue
         self.cursur = min(self.cursur+1, self.num_frames-1)
         self.tl_slider.setValue(self.cursur)
 
     def on_play_video_timer(self):
+        self.load_current_image_mask(no_mask=True) # 然後讀取該cursor的圖片與mask. mask不一定存在
+        self.load_current_torch_image_mask(no_mask=True) #將圖片(Numpy)轉成張量(Tensor)
+        # pdb.set_trace()
+        # self.get_bbox_from_mask()
+        (min_col,min_row,max_col,max_row) = get_bbox_from_mask(self.current_mask)
+        # 將辨識完的結果 處理完後丟到 Queue 裡面
+        # self.wait_and_put(self.det_queue, (orig_imgs[k], im_names[k], boxes_k, scores[dets[:, 0] == k], ids[dets[:, 0] == k], inps, cropped_boxes))
+        if len(self.det_queue[self.cursur]) > 1:
+            self.det_queue[self.cursur] = []
+        self.det_queue[self.cursur].append(self.current_image)
+        self.det_queue[self.cursur].append(str(self.cursur) + '.jpg')
+        self.det_queue[self.cursur].append(torch.from_numpy(np.array([[min_col,min_row,max_col,max_row]])))
+        self.det_queue[self.cursur].append(torch.tensor([[1.]])) # bbox has no score , let it be a 100% accuracy
+        self.det_queue[self.cursur].append(torch.tensor([[0.]])) # bbox has no ids 
+        inps = torch.zeros(torch.from_numpy(np.array([[min_col,min_row,max_col,max_row]])).size(0), 3, *self._input_size)
+        self.det_queue[self.cursur].append(inps) #
+        cropped_boxes = torch.zeros(torch.from_numpy(np.array([[min_col,min_row,max_col,max_row]])).size(0), 4)
+        self.det_queue[self.cursur].append(cropped_boxes) # bbox has no ids 
         self.cursur += 1
         if self.cursur > self.num_frames-1:
             self.cursur = 0
         self.tl_slider.setValue(self.cursur)
-
+        if self.cursur > self.num_frames-1:
+            self.cursur = 0
+        # if self.cursur == self.num_frames - 1:
+        #     self.console_push_text('play stop.')
+        #     self.timer.stop()
+        
+        
     def on_play_video(self):
         if self.timer.isActive():
             self.timer.stop()
             self.play_button.setText('Play Video')
         else:
-            self.timer.start(1000 / 30)
+            self.timer.start(1000 / 30)   # active timer to umplement on_play_video_timer
             self.play_button.setText('Stop Video')
 
     def on_reset_mask(self):
@@ -689,8 +853,8 @@ class App(QWidget):
         self.brush_vis_alpha = cv2.circle(self.brush_vis_alpha, 
                 (int(round(ex)), int(round(ey))), self.brush_size//2+1, 0.5, thickness=-1)
 
-    def on_mouse_press(self, event):
-        if self.is_pos_out_of_bound(event.x(), event.y()):
+    def on_mouse_press(self, event):  # 滑鼠壓下
+        if self.is_pos_out_of_bound(event.x(), event.y()): # 滑鼠點擊非功能區域，不做任何事情
             return
 
         # mid-click
@@ -705,13 +869,13 @@ class App(QWidget):
             self.show_current_frame()
             return
 
-        self.right_click = (event.button() == Qt.RightButton)
+        self.right_click = (event.button() == Qt.RightButton) # 滑鼠右鍵
         self.pressed = True
 
         h, w = self.height, self.width
 
-        self.load_current_torch_image_mask()
-        image = self.current_image_torch
+        self.load_current_torch_image_mask()                  # 讀取Mask，如果是第一幀且尚未點擊，這行就沒做事
+        image = self.current_image_torch                      # 讀取幀
 
         last_interaction = self.interaction
         new_interaction = None
@@ -727,23 +891,23 @@ class App(QWidget):
                         self.num_objects)
                 new_interaction.set_size(self.brush_size)
         elif self.curr_interaction == 'Click':
-            if (last_interaction is None or type(last_interaction) != ClickInteraction 
+            if (last_interaction is None or type(last_interaction) != ClickInteraction  # 圖片沒被點過 (該幀完全沒有mask)
                     or last_interaction.tar_obj != self.current_object):
-                self.complete_interaction()
-                self.fbrs_controller.unanchor()
+                self.complete_interaction()                 # 
+                self.fbrs_controller.unanchor()             # 這裡就是利用fbrs的功能物件 (https://github.com/SamsungLabs/fbrs_interactive_segmentation)
                 new_interaction = ClickInteraction(image, self.current_prob, (h, w), 
                             self.fbrs_controller, self.current_object)
 
         if new_interaction is not None:
-            self.interaction = new_interaction
+            self.interaction = new_interaction              # 記錄點擊過的幀 (同時代表該幀也有mask)
 
-        # Just motion it as the first step
+        # Just motion it as the first step                  # event:  <PyQt5.QtGui.QMouseEvent>
         self.on_mouse_motion(event)
 
     def on_mouse_motion(self, event):
-        ex, ey = self.get_scaled_pos(event.x(), event.y())
+        ex, ey = self.get_scaled_pos(event.x(), event.y())  # 滑鼠點擊在幀上的位置
         self.last_ex, self.last_ey = ex, ey
-        self.clear_brush()
+        self.clear_brush()                                  # 清除 某種東西
         # Visualize
         self.vis_brush(ex, ey)
         if self.pressed:
@@ -752,8 +916,8 @@ class App(QWidget):
                 self.vis_map, self.vis_alpha = self.interaction.push_point(
                     ex, ey, obj, (self.vis_map, self.vis_alpha)
                 )
-        self.update_interact_vis()
-        self.update_minimap()
+        self.update_interact_vis()                          # 
+        self.update_minimap()                               #
 
     def update_interacted_mask(self):
         self.current_prob = self.interacted_prob
@@ -805,7 +969,7 @@ class App(QWidget):
     def update_gpu_usage(self):
         info = torch.cuda.mem_get_info()
         global_free, global_total = info
-        global_free /= (2**30)
+        global_free /= (2**30)  # unit GB
         global_total /= (2**30)
         global_used = global_total - global_free
 
@@ -837,6 +1001,8 @@ class App(QWidget):
             self.work_mem_gauge.setFormat('Unknown')
             self.long_mem_gauge.setFormat('Unknown')
             self.work_mem_gauge.setValue(0)
+            
+            
             self.long_mem_gauge.setValue(0)
 
     def on_work_min_change(self):
@@ -906,6 +1072,7 @@ class App(QWidget):
         self._try_load_layer(file_name)
 
     def _try_load_layer(self, file_name):
+        # file_name : ./docs/ECCV-logo.png
         try:
             layer = self.res_man.read_external_image(file_name, size=(self.height, self.width))
 
@@ -931,3 +1098,67 @@ class App(QWidget):
 
     def on_save_visualization_toggle(self):
         self.save_visualization = self.save_visualization_checkbox.isChecked()
+    
+
+    def pose_estimate(self):
+        output_layer_names = None
+        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+        # pdb.set_trace()
+        w,h,c = self.det_queue[0][0].shape
+        videoWriter = cv2.VideoWriter(os.path.join(self.pose_config.out_video_root,f'vis_{os.path.basename(self.pose_config.video_path)}'),fourcc,self.fps, (h,w))
+        
+        
+        
+        for index,human_bbox in enumerate(self.det_queue):
+            print(index)
+            if index == len(self.det_queue)-1:
+                break
+            # pdb.set_trace()
+            origin_img = cv2.cvtColor(self.det_queue[index][0], cv2.COLOR_BGR2RGB)         # RGB -> BGR for pose estimation
+            pose_results, returned_outputs = inference_top_down_pose_model(
+                self.pose_model,                          # pose_model
+                origin_img,                               # origin img
+                self.det_queue[index][2],                 # person_results(bbox)
+                bbox_thr=self.pose_config.bbox_thr,       # bbox_thr
+                format='xyxy',
+                dataset=self.dataset,
+                dataset_info=self.dataset_info,           # dataset_info
+                return_heatmap=False,
+                outputs=output_layer_names)
+            
+            # pdb.set_trace()
+            vis_img = vis_pose_result(
+                self.pose_model,                          # pose_model
+                origin_img,                               # origin img
+                pose_results,                 # person_results(bbox)
+                dataset=self.dataset,                     # bbox_thr
+                dataset_info=self.dataset_info,           # dataset_info
+                kpt_score_thr=self.pose_config.kpt_thr,   # kpt_score_thr
+                radius=self.pose_config.radius,          # keypoint radius  
+                thickness=self.pose_config.thickness,     # limb thickness
+                show=False)                               # show process
+            # pdb.set_trace()
+            videoWriter.write(vis_img)
+            
+        # pdb.set_trace()
+        print('finish pose estimation')
+        videoWriter.release()
+
+
+    def loop(self):
+        n = 0
+        while True:
+            yield n
+            n += 1
+    
+    def stopped(self):
+        if self.args.sp:
+            return self._stopped
+        else:
+            return self._stopped.value
+    @property
+    def length(self):
+        return self.datalen
+    
+    def wait_and_put(self, queue, item):
+            queue.put(item)
