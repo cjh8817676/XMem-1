@@ -2,7 +2,7 @@ import os
 from os import path
 import shutil
 import collections
-
+import pdb
 import cv2
 from PIL import Image
 if not hasattr(Image, 'Resampling'):  # Pillow<9.0
@@ -58,7 +58,7 @@ class ResourceManager:
             self.workspace = path.join('./workspace', basename)
 
         print(f'Workspace is in: {self.workspace}')
-
+        # pdb.set_trace()
         # determine the location of input images
         need_decoding = False
         need_resizing = False
@@ -79,7 +79,7 @@ class ResourceManager:
         # convert read functions to be buffered
         self.get_image = LRU(self._get_image_unbuffered, maxsize=config['buffer_size'])
         self.get_mask = LRU(self._get_mask_unbuffered, maxsize=config['buffer_size'])
-
+        # pdb.set_trace()
         # extract frames from video
         if need_decoding:
             self._extract_frames(video)

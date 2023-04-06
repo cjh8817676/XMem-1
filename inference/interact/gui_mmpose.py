@@ -21,17 +21,16 @@ import cv2
 import sys
 # fix conflicts between qt5 and cv2
 os.environ.pop("QT_QPA_PLATFORM_PLUGIN_PATH")
-
+import json
 import numpy as np
 import torch
 from queue import Queue
 from PyQt5.QtWidgets import (QWidget, QApplication, QComboBox, QCheckBox,
-    QHBoxLayout, QLabel, QPushButton, QTextEdit, QSpinBox, QFileDialog,
+    QHBoxLayout, QLabel, QPushButton, QTextEdit, QFileDialog,
     QPlainTextEdit, QVBoxLayout, QSizePolicy, QButtonGroup, QSlider, QShortcut, QRadioButton)
 import pdb
 from PyQt5.QtGui import QPixmap, QKeySequence, QImage, QTextCursor, QIcon
 from PyQt5.QtCore import Qt, QTimer
-from torchvision.ops import masks_to_boxes
 from model.network import XMem
 import matplotlib.pyplot as plt
 from inference.inference_core import InferenceCore
@@ -53,6 +52,9 @@ try:
     has_mmdet = True
 except (ImportError, ModuleNotFoundError):
     has_mmdet = False
+    
+
+from alphapose.utils.writer import DataWriter
 
 
 
@@ -67,6 +69,28 @@ def get_bbox_from_mask(current_mask):
     for row in range(0,len(current_mask)):  # num of row (h)
         for col in range(0,len(current_mask[0])):  # num of col (w)
             if (current_mask[row][col] == 1):
+                min_row = min(min_row,row)
+                min_col = min(min_col, col)
+                max_row = max(max_row,row)
+                max_col = max(max_col,col)
+    min_col = min_col - 5 if min_col - 5 > 0 else min_col 
+    min_row = min_row - 5 if min_row - 5 > 0 else min_row
+    
+    max_row = max_row + 5 if max_row + 5 < len(current_mask) else max_row
+    max_col = max_col + 5 if max_col + 5 < len(current_mask[0]) else max_col
+    return min_col,min_row,max_col,max_row
+
+@jit(nopython=True)
+def get_bbox_from_mask2(current_mask):
+    
+    # print(current_mask.shape)
+    min_row = 2000
+    min_col = 2000
+    max_row = -1
+    max_col = -1
+    for row in range(0,len(current_mask)):  # num of row (h)
+        for col in range(0,len(current_mask[0])):  # num of col (w)
+            if (current_mask[row][col] == 3):
                 min_row = min(min_row,row)
                 min_col = min(min_col, col)
                 max_row = max(max_row,row)
@@ -131,6 +155,7 @@ class App(QWidget):  # net : XMem -> 表示net一定是XMem物件
         self.processor = InferenceCore(net, config)                         # XMem 模型本體
         self.processor.set_all_labels(list(range(1, self.num_objects+1)))   # 決定追蹤的物體數
         
+    
         '''resource_manager:
             控制跟影片讀取寫出相關事項
             Ex: 
@@ -499,23 +524,21 @@ class App(QWidget):  # net : XMem -> 表示net一定是XMem物件
                             self.overlay_layer, self.vis_target_objects)
         if self.cursur==0 or self.cursur==self.datalen-1:
             self.det_queue[self.cursur] = []
-        # self.get_bbox_from_mask()  # 轉成bbox
         # pdb.set_trace()
+         # 轉成bbox
         (min_col,min_row,max_col,max_row) = get_bbox_from_mask(self.current_mask)
         # 將辨識完的結果 處理完後丟到 Queue 裡面
-        
-    
-        if len(self.det_queue[self.cursur]) > 1:
-            self.det_queue[self.cursur] = []
-        self.det_queue[self.cursur].append(self.current_image)
-        self.det_queue[self.cursur].append(str(self.cursur) + '.jpg')
-        self.det_queue[self.cursur].append(torch.from_numpy(np.array([[min_col,min_row,max_col,max_row]])))
-        self.det_queue[self.cursur].append(torch.tensor([[1.]])) # bbox has no score , let it be a 100% accuracy
-        self.det_queue[self.cursur].append(torch.tensor([[0.]])) # bbox has no ids 
-        inps = torch.zeros(torch.from_numpy(np.array([[min_col,min_row,max_col,max_row]])).size(0), 3, *self._input_size)
-        self.det_queue[self.cursur].append(inps) #
-        cropped_boxes = torch.zeros(torch.from_numpy(np.array([[min_col,min_row,max_col,max_row]])).size(0), 4)
-        self.det_queue[self.cursur].append(cropped_boxes) # bbox has no ids
+        # if len(self.det_queue[self.cursur]) > 1:
+        #     self.det_queue[self.cursur] = []
+        # self.det_queue[self.cursur].append(self.current_image)
+        # self.det_queue[self.cursur].append(str(self.cursur) + '.jpg')
+        # self.det_queue[self.cursur].append(torch.from_numpy(np.array([[min_col,min_row,max_col,max_row]])))
+        # self.det_queue[self.cursur].append(torch.tensor([[1.]])) # bbox has no score , let it be a 100% accuracy
+        # self.det_queue[self.cursur].append(torch.tensor([[0.]])) # bbox has no ids 
+        # inps = torch.zeros(torch.from_numpy(np.array([[min_col,min_row,max_col,max_row]])).size(0), 3, *self._input_size)
+        # self.det_queue[self.cursur].append(inps) #
+        # cropped_boxes = torch.zeros(torch.from_numpy(np.array([[min_col,min_row,max_col,max_row]])).size(0), 4)
+        # self.det_queue[self.cursur].append(cropped_boxes) # bbox has no ids
         
     def update_interact_vis(self):
         # Update the interactions without re-computing the overlay
@@ -720,6 +743,7 @@ class App(QWidget):  # net : XMem -> 表示net一定是XMem物件
 
             self.save_current_mask() # 將mask存成圖片 
             # self.get_bbox_from_mask()
+            # pdb.set_trace()
             (min_col,min_row,max_col,max_row) = get_bbox_from_mask(self.current_mask)
             # 將辨識完的結果 處理完後丟到 Queue 裡面
             # self.wait_and_put(self.det_queue, (orig_imgs[k], im_names[k], boxes_k, scores[dets[:, 0] == k], ids[dets[:, 0] == k], inps, cropped_boxes))
@@ -769,6 +793,14 @@ class App(QWidget):  # net : XMem -> 表示net一定是XMem物件
     def on_play_video_timer(self):
         self.load_current_image_mask(no_mask=True) # 然後讀取該cursor的圖片與mask. mask不一定存在
         self.load_current_torch_image_mask(no_mask=True) #將圖片(Numpy)轉成張量(Tensor)
+        
+        if self.cursur >= self.num_frames-1:
+            self.timer.stop()
+            self.play_button.setText('Play Video')
+            self.console_push_text(f'stop playing video')
+            self.cursur = 0
+            self.tl_slider.setValue(self.cursur)
+            
         # pdb.set_trace()
         # self.get_bbox_from_mask()
         (min_col,min_row,max_col,max_row) = get_bbox_from_mask(self.current_mask)
@@ -786,14 +818,7 @@ class App(QWidget):  # net : XMem -> 表示net一定是XMem物件
         cropped_boxes = torch.zeros(torch.from_numpy(np.array([[min_col,min_row,max_col,max_row]])).size(0), 4)
         self.det_queue[self.cursur].append(cropped_boxes) # bbox has no ids 
         self.cursur += 1
-        if self.cursur > self.num_frames-1:
-            self.cursur = 0
         self.tl_slider.setValue(self.cursur)
-        if self.cursur > self.num_frames-1:
-            self.cursur = 0
-        # if self.cursur == self.num_frames - 1:
-        #     self.console_push_text('play stop.')
-        #     self.timer.stop()
         
         
     def on_play_video(self):
@@ -1104,47 +1129,88 @@ class App(QWidget):  # net : XMem -> 表示net一定是XMem物件
         output_layer_names = None
         fourcc = cv2.VideoWriter_fourcc(*'mp4v')
         # pdb.set_trace()
-        w,h,c = self.det_queue[0][0].shape
-        videoWriter = cv2.VideoWriter(os.path.join(self.pose_config.out_video_root,f'vis_{os.path.basename(self.pose_config.video_path)}'),fourcc,self.fps, (h,w))
+        final_result = []
+        det_data = []
+        temp = 0
+        for i in self.det_queue:                      # 將每個frame物件偵測的結果從 det_queue 取出。
+            if len(i) != 0 :
+                det_data.append(i)
+                temp = i
+                
+        w,h,c = det_data[0][0].shape
+        
+        # pdb.set_trace()
+        model = self.pose_config.pose_config.split('/')[-1]
+        model_name = model.split("_")[0]
+        
+        videoWriter = cv2.VideoWriter(os.path.join(self.pose_config.out_video_root,f'vis_{model_name}_{os.path.basename(self.pose_config.video_path)}'),fourcc,self.fps, (h,w))
         
         
-        
-        for index,human_bbox in enumerate(self.det_queue):
-            print(index)
-            if index == len(self.det_queue)-1:
+        for index,human_detect in tqdm(enumerate(det_data)):
+            # print(index)
+            _result = []
+            result = []
+            if index == len(det_data)-1:
                 break
+            
             # pdb.set_trace()
-            origin_img = cv2.cvtColor(self.det_queue[index][0], cv2.COLOR_BGR2RGB)         # RGB -> BGR for pose estimation
+            origin_img = cv2.cvtColor(det_data[index][0], cv2.COLOR_BGR2RGB)         # RGB -> BGR for pose estimation
             pose_results, returned_outputs = inference_top_down_pose_model(
                 self.pose_model,                          # pose_model
                 origin_img,                               # origin img
-                self.det_queue[index][2],                 # person_results(bbox)
+                det_data[index][2],                 # person_results(bbox)
                 bbox_thr=self.pose_config.bbox_thr,       # bbox_thr
                 format='xyxy',
                 dataset=self.dataset,
                 dataset_info=self.dataset_info,           # dataset_info
                 return_heatmap=False,
                 outputs=output_layer_names)
-            
+            # boxes, scores, ids, hm, cropped_boxes, orig_img, im_name
             # pdb.set_trace()
+            # self.writer(boxes, scores, ids, hm, cropped_boxes, origin_img, index)
+            _result.append(
+                {
+                    'keypoints':pose_results[0]['keypoints'][:,0:2],
+                    'kp_score':pose_results[0]['keypoints'][:,2:],
+                    # 'proposal_score': torch.mean(preds_scores[k]) + scores[k] + 1.25 * max(preds_scores[k]),
+                    'idx':[0.0],
+                    'box':pose_results[0]['bbox'][0:4].tolist()
+                }
+            )
+            
+            result = {
+                'imgname': str(index)+'.jpg',
+                'result': _result
+            }
+            final_result.append(result)
+            
+            # temp_pose_result = pose_results
             vis_img = vis_pose_result(
                 self.pose_model,                          # pose_model
                 origin_img,                               # origin img
-                pose_results,                 # person_results(bbox)
+                pose_results,                             # person_results(bbox)
                 dataset=self.dataset,                     # bbox_thr
                 dataset_info=self.dataset_info,           # dataset_info
                 kpt_score_thr=self.pose_config.kpt_thr,   # kpt_score_thr
-                radius=self.pose_config.radius,          # keypoint radius  
+                radius=self.pose_config.radius,           # keypoint radius  
                 thickness=self.pose_config.thickness,     # limb thickness
                 show=False)                               # show process
-            # pdb.set_trace()
+   
+
+            # write video
             videoWriter.write(vis_img)
             
         # pdb.set_trace()
-        print('finish pose estimation')
+        print('finish pose estimation')  
         videoWriter.release()
+        print('wrinting result to json')
+        video_name = self.config['video_path'].split("/")[-1]
+        # pdb.set_trace()
+        write_json(final_result, self.pose_config.out_video_root, form=None, for_eval=False, outputfile=f'{video_name}')
+        print('finish wrinte result to json')
+        
 
-
+    
     def loop(self):
         n = 0
         while True:
@@ -1162,3 +1228,98 @@ class App(QWidget):  # net : XMem -> 表示net一定是XMem物件
     
     def wait_and_put(self, queue, item):
             queue.put(item)
+
+def write_json(all_results, outputpath, form=None, for_eval=False, outputfile='alphapose-results.json'):
+    '''
+    all_result: result dict of predictions
+    outputpath: output directory
+    '''
+    # pdb.set_trace()
+    json_results = []
+    json_results_cmu = {}
+    counter = 0
+    for im_res in all_results:
+        # print(counter)
+        counter += 1
+        im_name = im_res['imgname']
+        for human in im_res['result']:
+            keypoints = []
+            result = {}
+            if for_eval:
+                result['image_id'] = int(os.path.basename(im_name).split('.')[0].split('_')[-1])
+            else:
+                result['image_id'] = os.path.basename(im_name)
+            result['category_id'] = 1
+
+            kp_preds = human['keypoints']
+            kp_scores = human['kp_score']
+            # pro_scores = human['proposal_score']
+            for n in range(kp_scores.shape[0]):
+                keypoints.append(float(kp_preds[n, 0]))
+                keypoints.append(float(kp_preds[n, 1]))
+                keypoints.append(float(kp_scores[n]))
+            result['keypoints'] = keypoints
+            # result['score'] = float(pro_scores)
+            if 'box' in human.keys():
+                result['box'] = human['box']
+            #pose track results by PoseFlow
+            if 'idx' in human.keys():
+                result['idx'] = human['idx']
+            
+            # 3d pose
+            if 'pred_xyz_jts' in human.keys():
+                pred_xyz_jts = human['pred_xyz_jts']
+                pred_xyz_jts = pred_xyz_jts.cpu().numpy().tolist()
+                result['pred_xyz_jts'] = pred_xyz_jts
+
+            if form == 'cmu': # the form of CMU-Pose
+                if result['image_id'] not in json_results_cmu.keys():
+                    json_results_cmu[result['image_id']]={}
+                    json_results_cmu[result['image_id']]['version']="AlphaPose v0.3"
+                    json_results_cmu[result['image_id']]['bodies']=[]
+                tmp={'joints':[]}
+                result['keypoints'].append((result['keypoints'][15]+result['keypoints'][18])/2)
+                result['keypoints'].append((result['keypoints'][16]+result['keypoints'][19])/2)
+                result['keypoints'].append((result['keypoints'][17]+result['keypoints'][20])/2)
+                indexarr=[0,51,18,24,30,15,21,27,36,42,48,33,39,45,6,3,12,9]
+                for i in indexarr:
+                    tmp['joints'].append(result['keypoints'][i])
+                    tmp['joints'].append(result['keypoints'][i+1])
+                    tmp['joints'].append(result['keypoints'][i+2])
+                json_results_cmu[result['image_id']]['bodies'].append(tmp)
+            elif form == 'open': # the form of OpenPose
+                if result['image_id'] not in json_results_cmu.keys():
+                    json_results_cmu[result['image_id']]={}
+                    json_results_cmu[result['image_id']]['version']="AlphaPose v0.3"
+                    json_results_cmu[result['image_id']]['people']=[]
+                tmp={'pose_keypoints_2d':[]}
+                result['keypoints'].append((result['keypoints'][15]+result['keypoints'][18])/2)
+                result['keypoints'].append((result['keypoints'][16]+result['keypoints'][19])/2)
+                result['keypoints'].append((result['keypoints'][17]+result['keypoints'][20])/2)
+                indexarr=[0,51,18,24,30,15,21,27,36,42,48,33,39,45,6,3,12,9]
+                for i in indexarr:
+                    tmp['pose_keypoints_2d'].append(result['keypoints'][i])
+                    tmp['pose_keypoints_2d'].append(result['keypoints'][i+1])
+                    tmp['pose_keypoints_2d'].append(result['keypoints'][i+2])
+                json_results_cmu[result['image_id']]['people'].append(tmp)
+            else:
+                json_results.append(result)
+    if form == 'cmu': # the form of CMU-Pose
+        with open(os.path.join(outputpath, outputfile), 'w') as json_file:
+            json_file.write(json.dumps(json_results_cmu))
+            if not os.path.exists(os.path.join(outputpath,'sep-json')):
+                os.mkdir(os.path.join(outputpath,'sep-json'))
+            for name in json_results_cmu.keys():
+                with open(os.path.join(outputpath,'sep-json',name.split('.')[0]+'.json'),'w') as json_file:
+                    json_file.write(json.dumps(json_results_cmu[name]))
+    elif form == 'open': # the form of OpenPose
+        with open(os.path.join(outputpath, outputfile), 'w') as json_file:
+            json_file.write(json.dumps(json_results_cmu))
+            if not os.path.exists(os.path.join(outputpath,'sep-json')):
+                os.mkdir(os.path.join(outputpath,'sep-json'))
+            for name in json_results_cmu.keys():
+                with open(os.path.join(outputpath,'sep-json',name.split('.')[0]+'.json'),'w') as json_file:
+                    json_file.write(json.dumps(json_results_cmu[name]))
+    else:
+        with open(os.path.join(outputpath, outputfile+'.json'), 'w') as json_file:
+            json_file.write(json.dumps(json_results))

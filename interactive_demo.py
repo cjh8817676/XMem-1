@@ -11,7 +11,7 @@ import sys
 from argparse import ArgumentParser
 
 import torch
-
+import pdb
 from model.network import XMem
 from inference.interact.s2m_controller import S2MController
 from inference.interact.fbrs_controller import FBRSController
@@ -86,7 +86,7 @@ if __name__ == '__main__':
             fbrs_controller = FBRSController(args.fbrs_model)
         else:
             fbrs_controller = None
-
+        pdb.set_trace()
         # Manages most IO
         resource_manager = ResourceManager(config)
 
