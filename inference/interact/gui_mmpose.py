@@ -191,6 +191,12 @@ class App(QWidget):  # net : XMem -> 表示net一定是XMem物件
         self.reset_button = QPushButton('Reset Frame')
         self.reset_button.clicked.connect(self.on_reset_mask)
         
+        self.next_frame_button = QPushButton('next_frame')
+        self.next_frame_button.clicked.connect(self.on_next_frame)
+        
+        self.last_frame_button = QPushButton('last frame')
+        self.last_frame_button.clicked.connect(self.on_prev_frame)
+        
         self.pose_button = QPushButton('Pose Estimation')
         self.pose_button.clicked.connect(self.pose_estimate)
 
@@ -337,6 +343,8 @@ class App(QWidget):  # net : XMem -> 表示net一定是XMem物件
         navi.addLayout(interact_subbox)
 
         navi.addStretch(1)
+        navi.addWidget(self.next_frame_button)
+        navi.addWidget(self.last_frame_button)
         navi.addWidget(self.reset_button)
 
         navi.addStretch(1)
@@ -528,8 +536,9 @@ class App(QWidget):  # net : XMem -> 表示net一定是XMem物件
          # 轉成bbox
         (min_col,min_row,max_col,max_row) = get_bbox_from_mask(self.current_mask)
         # 將辨識完的結果 處理完後丟到 Queue 裡面
-        # if len(self.det_queue[self.cursur]) > 1:
-        #     self.det_queue[self.cursur] = []
+        if len(self.det_queue[self.cursur]) > 1:
+            self.det_queue[self.cursur] = []
+        # pdb.set_trace()
         # self.det_queue[self.cursur].append(self.current_image)
         # self.det_queue[self.cursur].append(str(self.cursur) + '.jpg')
         # self.det_queue[self.cursur].append(torch.from_numpy(np.array([[min_col,min_row,max_col,max_row]])))
@@ -725,7 +734,22 @@ class App(QWidget):  # net : XMem -> 表示net一定是XMem物件
         self.console_push_text('Propagation started.')
         self.current_prob = self.processor.step(self.current_image_torch, self.current_prob[1:])
         self.current_mask = torch_prob_to_numpy_mask(self.current_prob)
-        # clear
+        
+        (min_col,min_row,max_col,max_row) = get_bbox_from_mask(self.current_mask)
+        if len(self.det_queue[self.cursur]) > 1:
+            self.det_queue[self.cursur] = []
+        self.det_queue[self.cursur].append(self.current_image)
+        self.det_queue[self.cursur].append(str(self.cursur) + '.jpg')
+        self.det_queue[self.cursur].append(torch.from_numpy(np.array([[min_col,min_row,max_col,max_row]])))
+        self.det_queue[self.cursur].append(torch.tensor([[1.]])) # bbox has no score , let it be a 100% accuracy
+        self.det_queue[self.cursur].append(torch.tensor([[0.]])) # bbox has no ids 
+        inps = torch.zeros(torch.from_numpy(np.array([[min_col,min_row,max_col,max_row]])).size(0), 3, *self._input_size)
+        self.det_queue[self.cursur].append(inps) #
+        cropped_boxes = torch.zeros(torch.from_numpy(np.array([[min_col,min_row,max_col,max_row]])).size(0), 4)
+        self.det_queue[self.cursur].append(cropped_boxes) # bbox has no ids 
+        self.det_queue[self.cursur].append(self.current_mask) # bbox has no ids 
+        
+       # clear
         self.interacted_prob = None
         self.reset_this_interaction()
         
@@ -749,6 +773,7 @@ class App(QWidget):  # net : XMem -> 表示net一定是XMem物件
             # self.wait_and_put(self.det_queue, (orig_imgs[k], im_names[k], boxes_k, scores[dets[:, 0] == k], ids[dets[:, 0] == k], inps, cropped_boxes))
             if len(self.det_queue[self.cursur]) > 1:
                 self.det_queue[self.cursur] = []
+            # pdb.set_trace()
             self.det_queue[self.cursur].append(self.current_image)
             self.det_queue[self.cursur].append(str(self.cursur) + '.jpg')
             self.det_queue[self.cursur].append(torch.from_numpy(np.array([[min_col,min_row,max_col,max_row]])))
@@ -758,6 +783,7 @@ class App(QWidget):  # net : XMem -> 表示net一定是XMem物件
             self.det_queue[self.cursur].append(inps) #
             cropped_boxes = torch.zeros(torch.from_numpy(np.array([[min_col,min_row,max_col,max_row]])).size(0), 4)
             self.det_queue[self.cursur].append(cropped_boxes) # bbox has no ids 
+            self.det_queue[self.cursur].append(self.current_mask) # bbox has no ids 
 
             self.show_current_frame(fast=True) # 更新畫面
 
@@ -794,32 +820,34 @@ class App(QWidget):  # net : XMem -> 表示net一定是XMem物件
         self.load_current_image_mask(no_mask=True) # 然後讀取該cursor的圖片與mask. mask不一定存在
         self.load_current_torch_image_mask(no_mask=True) #將圖片(Numpy)轉成張量(Tensor)
         
-        if self.cursur >= self.num_frames-1:
+        if self.cursur == self.num_frames-1:
             self.timer.stop()
             self.play_button.setText('Play Video')
             self.console_push_text(f'stop playing video')
             self.cursur = 0
             self.tl_slider.setValue(self.cursur)
+        else:
+            # pdb.set_trace()
+            # self.get_bbox_from_mask()
+            (min_col,min_row,max_col,max_row) = get_bbox_from_mask(self.current_mask)
+            # 將辨識完的結果 處理完後丟到 Queue 裡面
+            # self.wait_and_put(self.det_queue, (orig_imgs[k], im_names[k], boxes_k, scores[dets[:, 0] == k], ids[dets[:, 0] == k], inps, cropped_boxes))
+            if len(self.det_queue[self.cursur]) > 1:
+                self.det_queue[self.cursur] = []
+            self.det_queue[self.cursur].append(self.current_image)
+            self.det_queue[self.cursur].append(str(self.cursur) + '.jpg')
+            self.det_queue[self.cursur].append(torch.from_numpy(np.array([[min_col,min_row,max_col,max_row]])))
+            self.det_queue[self.cursur].append(torch.tensor([[1.]])) # bbox has no score , let it be a 100% accuracy
+            self.det_queue[self.cursur].append(torch.tensor([[0.]])) # bbox has no ids 
+            inps = torch.zeros(torch.from_numpy(np.array([[min_col,min_row,max_col,max_row]])).size(0), 3, *self._input_size)
+            self.det_queue[self.cursur].append(inps) #
+            cropped_boxes = torch.zeros(torch.from_numpy(np.array([[min_col,min_row,max_col,max_row]])).size(0), 4)
+            self.det_queue[self.cursur].append(cropped_boxes) 
+            self.det_queue[self.cursur].append(self.current_mask) 
             
-        # pdb.set_trace()
-        # self.get_bbox_from_mask()
-        (min_col,min_row,max_col,max_row) = get_bbox_from_mask(self.current_mask)
-        # 將辨識完的結果 處理完後丟到 Queue 裡面
-        # self.wait_and_put(self.det_queue, (orig_imgs[k], im_names[k], boxes_k, scores[dets[:, 0] == k], ids[dets[:, 0] == k], inps, cropped_boxes))
-        if len(self.det_queue[self.cursur]) > 1:
-            self.det_queue[self.cursur] = []
-        self.det_queue[self.cursur].append(self.current_image)
-        self.det_queue[self.cursur].append(str(self.cursur) + '.jpg')
-        self.det_queue[self.cursur].append(torch.from_numpy(np.array([[min_col,min_row,max_col,max_row]])))
-        self.det_queue[self.cursur].append(torch.tensor([[1.]])) # bbox has no score , let it be a 100% accuracy
-        self.det_queue[self.cursur].append(torch.tensor([[0.]])) # bbox has no ids 
-        inps = torch.zeros(torch.from_numpy(np.array([[min_col,min_row,max_col,max_row]])).size(0), 3, *self._input_size)
-        self.det_queue[self.cursur].append(inps) #
-        cropped_boxes = torch.zeros(torch.from_numpy(np.array([[min_col,min_row,max_col,max_row]])).size(0), 4)
-        self.det_queue[self.cursur].append(cropped_boxes) # bbox has no ids 
-        self.cursur += 1
-        self.tl_slider.setValue(self.cursur)
-        
+            self.on_next_frame()
+            
+            
         
     def on_play_video(self):
         if self.timer.isActive():
@@ -1132,42 +1160,56 @@ class App(QWidget):  # net : XMem -> 表示net一定是XMem物件
         final_result = []
         det_data = []
         temp = 0
+        scale_factor = 1080 / 720
         for i in self.det_queue:                      # 將每個frame物件偵測的結果從 det_queue 取出。
             if len(i) != 0 :
+                i[2] = i[2]*scale_factor
                 det_data.append(i)
                 temp = i
-                
-        w,h,c = det_data[0][0].shape
+
+        cap = cv2.VideoCapture(self.video_path)
+        assert cap.isOpened(), f'Faild to load video file {self.video_path}'
+        
+        w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))          # 影片寬
+        h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))         # 影片高
         
         # pdb.set_trace()
         model = self.pose_config.pose_config.split('/')[-1]
         model_name = model.split("_")[0]
         
-        videoWriter = cv2.VideoWriter(os.path.join(self.pose_config.out_video_root,f'vis_{model_name}_{os.path.basename(self.pose_config.video_path)}'),fourcc,self.fps, (h,w))
+        videoWriter = cv2.VideoWriter(os.path.join(self.pose_config.out_video_root,f'vis_{model_name}_{os.path.basename(self.pose_config.video_path)}'),fourcc,self.fps, (w,h))
+        kernel = np.ones((5,5), np.uint8)
+
+        start = int(det_data[0][1][0:-4])
+        end = int(det_data[-1][1][0:-4])
         
-        
-        for index,human_detect in tqdm(enumerate(det_data)):
-            # print(index)
+        index = 0
+        conuter = 0
+        while (cap.isOpened()):
+            flag, img = cap.read()
+            if not flag:
+                break
+            if index < start:
+                index +=1
+                continue
+            if index >= end or  index == len(det_data)-1:
+                break
             _result = []
             result = []
-            if index == len(det_data)-1:
-                break
-            
-            # pdb.set_trace()
-            origin_img = cv2.cvtColor(det_data[index][0], cv2.COLOR_BGR2RGB)         # RGB -> BGR for pose estimation
             pose_results, returned_outputs = inference_top_down_pose_model(
                 self.pose_model,                          # pose_model
-                origin_img,                               # origin img
-                det_data[index][2],                 # person_results(bbox)
+                img,                               # origin img
+                det_data[conuter][2],                 # person_results(bbox)
                 bbox_thr=self.pose_config.bbox_thr,       # bbox_thr
                 format='xyxy',
                 dataset=self.dataset,
                 dataset_info=self.dataset_info,           # dataset_info
-                return_heatmap=False,
+                return_heatmap=True,
                 outputs=output_layer_names)
+            
+            conuter += 1
+            
             # boxes, scores, ids, hm, cropped_boxes, orig_img, im_name
-            # pdb.set_trace()
-            # self.writer(boxes, scores, ids, hm, cropped_boxes, origin_img, index)
             _result.append(
                 {
                     'keypoints':pose_results[0]['keypoints'][:,0:2],
@@ -1184,10 +1226,9 @@ class App(QWidget):  # net : XMem -> 表示net一定是XMem物件
             }
             final_result.append(result)
             
-            # temp_pose_result = pose_results
             vis_img = vis_pose_result(
                 self.pose_model,                          # pose_model
-                origin_img,                               # origin img
+                img,                                      # origin img
                 pose_results,                             # person_results(bbox)
                 dataset=self.dataset,                     # bbox_thr
                 dataset_info=self.dataset_info,           # dataset_info
@@ -1195,8 +1236,7 @@ class App(QWidget):  # net : XMem -> 表示net一定是XMem物件
                 radius=self.pose_config.radius,           # keypoint radius  
                 thickness=self.pose_config.thickness,     # limb thickness
                 show=False)                               # show process
-   
-
+            index += 1
             # write video
             videoWriter.write(vis_img)
             

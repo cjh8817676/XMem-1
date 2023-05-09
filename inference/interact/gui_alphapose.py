@@ -1213,6 +1213,7 @@ class App(QWidget):  # net : XMem -> 表示net一定是XMem物件
                         boxes,scores,ids,hm,cropped_boxes = track(tracker,self.args,orig_img,inps,boxes,hm,cropped_boxes,im_name,scores)# 給予bounding box編號
                     hm = hm.cpu()  # hm: heat_map
                     hm = hm.type(torch.FloatTensor)
+                    hm = None
                     # pdb.set_trace()
                     writer.save(boxes, scores, ids, hm, cropped_boxes, orig_img, im_name)
                     if self.args.profile:
