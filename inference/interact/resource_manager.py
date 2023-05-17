@@ -102,6 +102,8 @@ class ResourceManager:
 
     def _extract_frames(self, video):
         cap = cv2.VideoCapture(video)
+        # pdb.set_trace()
+        len_of_video = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         frame_index = 0
         print(f'Extracting frames from {video} into {self.image_dir}...')
         bar = progressbar.ProgressBar(max_value=progressbar.UnknownLength)

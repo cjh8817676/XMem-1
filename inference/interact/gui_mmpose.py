@@ -531,24 +531,12 @@ class App(QWidget):  # net : XMem -> 表示net一定是XMem物件
         self.viz = get_visualization(self.viz_mode, self.current_image, self.current_mask, 
                             self.overlay_layer, self.vis_target_objects)
         if self.cursur==0 or self.cursur==self.datalen-1:
+            # pdb.set_trace()
             self.det_queue[self.cursur] = []
         # pdb.set_trace()
          # 轉成bbox
         (min_col,min_row,max_col,max_row) = get_bbox_from_mask(self.current_mask)
-        # 將辨識完的結果 處理完後丟到 Queue 裡面
-        if len(self.det_queue[self.cursur]) > 1:
-            self.det_queue[self.cursur] = []
-        # pdb.set_trace()
-        # self.det_queue[self.cursur].append(self.current_image)
-        # self.det_queue[self.cursur].append(str(self.cursur) + '.jpg')
-        # self.det_queue[self.cursur].append(torch.from_numpy(np.array([[min_col,min_row,max_col,max_row]])))
-        # self.det_queue[self.cursur].append(torch.tensor([[1.]])) # bbox has no score , let it be a 100% accuracy
-        # self.det_queue[self.cursur].append(torch.tensor([[0.]])) # bbox has no ids 
-        # inps = torch.zeros(torch.from_numpy(np.array([[min_col,min_row,max_col,max_row]])).size(0), 3, *self._input_size)
-        # self.det_queue[self.cursur].append(inps) #
-        # cropped_boxes = torch.zeros(torch.from_numpy(np.array([[min_col,min_row,max_col,max_row]])).size(0), 4)
-        # self.det_queue[self.cursur].append(cropped_boxes) # bbox has no ids
-        
+
     def update_interact_vis(self):
         # Update the interactions without re-computing the overlay
         # pdb.set_trace()
@@ -821,10 +809,25 @@ class App(QWidget):  # net : XMem -> 表示net一定是XMem物件
         self.load_current_torch_image_mask(no_mask=True) #將圖片(Numpy)轉成張量(Tensor)
         
         if self.cursur == self.num_frames-1:
+            (min_col,min_row,max_col,max_row) = get_bbox_from_mask(self.current_mask)
+            # 將辨識完的結果 處理完後丟到 Queue 裡面
+            # self.wait_and_put(self.det_queue, (orig_imgs[k], im_names[k], boxes_k, scores[dets[:, 0] == k], ids[dets[:, 0] == k], inps, cropped_boxes))
+            if len(self.det_queue[self.cursur]) > 1:
+                self.det_queue[self.cursur] = []
+            self.det_queue[self.cursur].append(self.current_image)
+            self.det_queue[self.cursur].append(str(self.cursur) + '.jpg')
+            self.det_queue[self.cursur].append(torch.from_numpy(np.array([[min_col,min_row,max_col,max_row]])))
+            self.det_queue[self.cursur].append(torch.tensor([[1.]])) # bbox has no score , let it be a 100% accuracy
+            self.det_queue[self.cursur].append(torch.tensor([[0.]])) # bbox has no ids 
+            inps = torch.zeros(torch.from_numpy(np.array([[min_col,min_row,max_col,max_row]])).size(0), 3, *self._input_size)
+            self.det_queue[self.cursur].append(inps) #
+            cropped_boxes = torch.zeros(torch.from_numpy(np.array([[min_col,min_row,max_col,max_row]])).size(0), 4)
+            self.det_queue[self.cursur].append(cropped_boxes) 
+            self.det_queue[self.cursur].append(self.current_mask) 
+            
             self.timer.stop()
             self.play_button.setText('Play Video')
             self.console_push_text(f'stop playing video')
-            self.cursur = 0
             self.tl_slider.setValue(self.cursur)
         else:
             # pdb.set_trace()
@@ -1154,20 +1157,23 @@ class App(QWidget):  # net : XMem -> 表示net一定是XMem物件
     
 
     def pose_estimate(self):
+        cap = cv2.VideoCapture(self.video_path)
         output_layer_names = None
         fourcc = cv2.VideoWriter_fourcc(*'mp4v')
         # pdb.set_trace()
         final_result = []
         det_data = []
-        temp = 0
-        scale_factor = 1080 / 720
+        
+        if self.pose_config.size == -1:
+            scale_factor = 1
+        else:
+            scale_factor = cv2.CAP_PROP_FRAME_HEIGHT / self.pose_config
         for i in self.det_queue:                      # 將每個frame物件偵測的結果從 det_queue 取出。
             if len(i) != 0 :
                 i[2] = i[2]*scale_factor
                 det_data.append(i)
                 temp = i
 
-        cap = cv2.VideoCapture(self.video_path)
         assert cap.isOpened(), f'Faild to load video file {self.video_path}'
         
         w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))          # 影片寬
@@ -1177,72 +1183,79 @@ class App(QWidget):  # net : XMem -> 表示net一定是XMem物件
         model = self.pose_config.pose_config.split('/')[-1]
         model_name = model.split("_")[0]
         
-        videoWriter = cv2.VideoWriter(os.path.join(self.pose_config.out_video_root,f'vis_{model_name}_{os.path.basename(self.pose_config.video_path)}'),fourcc,self.fps, (w,h))
-        kernel = np.ones((5,5), np.uint8)
+        videoWriter = cv2.VideoWriter(os.path.join(self.pose_config.out_video_root,f'{model_name}_{os.path.basename(self.pose_config.video_path)}'),fourcc,self.fps, (w,h))
+        videoWriter_cut = cv2.VideoWriter(os.path.join(self.pose_config.out_video_root,f'vis_{os.path.basename(self.pose_config.video_path)}'),fourcc,self.fps, (w,h))
 
         start = int(det_data[0][1][0:-4])
         end = int(det_data[-1][1][0:-4])
         
         index = 0
         conuter = 0
-        while (cap.isOpened()):
-            flag, img = cap.read()
-            if not flag:
-                break
-            if index < start:
-                index +=1
-                continue
-            if index >= end or  index == len(det_data)-1:
-                break
-            _result = []
-            result = []
-            pose_results, returned_outputs = inference_top_down_pose_model(
-                self.pose_model,                          # pose_model
-                img,                               # origin img
-                det_data[conuter][2],                 # person_results(bbox)
-                bbox_thr=self.pose_config.bbox_thr,       # bbox_thr
-                format='xyxy',
-                dataset=self.dataset,
-                dataset_info=self.dataset_info,           # dataset_info
-                return_heatmap=True,
-                outputs=output_layer_names)
-            
-            conuter += 1
-            
-            # boxes, scores, ids, hm, cropped_boxes, orig_img, im_name
-            _result.append(
-                {
-                    'keypoints':pose_results[0]['keypoints'][:,0:2],
-                    'kp_score':pose_results[0]['keypoints'][:,2:],
-                    # 'proposal_score': torch.mean(preds_scores[k]) + scores[k] + 1.25 * max(preds_scores[k]),
-                    'idx':[0.0],
-                    'box':pose_results[0]['bbox'][0:4].tolist()
+        video_length = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        with tqdm(total=video_length) as pbar:
+            while (cap.isOpened()):
+                flag, img = cap.read()
+                if not flag:
+                    break
+                if index < start:
+                    index +=1
+                    pbar.update(1)
+                    continue
+                if index > end:
+                    break
+                _result = []
+                result = []
+                pose_results, returned_outputs = inference_top_down_pose_model(
+                    self.pose_model,                          # pose_model
+                    img,                               # origin img
+                    det_data[conuter][2],                 # person_results(bbox)
+                    bbox_thr=self.pose_config.bbox_thr,       # bbox_thr
+                    format='xyxy',
+                    dataset=self.dataset,
+                    dataset_info=self.dataset_info,           # dataset_info
+                    return_heatmap=True,
+                    outputs=output_layer_names)
+                
+                conuter += 1
+    
+                # pdb.set_trace()
+                # boxes, scores, ids, hm, cropped_boxes, orig_img, im_name
+                _result.append(
+                    {
+                        'keypoints':pose_results[0]['keypoints'][:,0:2],
+                        'kp_score':pose_results[0]['keypoints'][:,2:],
+                        # 'proposal_score': torch.mean(preds_scores[k]) + scores[k] + 1.25 * max(preds_scores[k]),
+                        'idx':[0.0],
+                        'box':pose_results[0]['bbox'][0:4].tolist()
+                    }
+                )
+                
+                result = {
+                    'imgname': str(index)+'.jpg',
+                    'result': _result
                 }
-            )
-            
-            result = {
-                'imgname': str(index)+'.jpg',
-                'result': _result
-            }
-            final_result.append(result)
-            
-            vis_img = vis_pose_result(
-                self.pose_model,                          # pose_model
-                img,                                      # origin img
-                pose_results,                             # person_results(bbox)
-                dataset=self.dataset,                     # bbox_thr
-                dataset_info=self.dataset_info,           # dataset_info
-                kpt_score_thr=self.pose_config.kpt_thr,   # kpt_score_thr
-                radius=self.pose_config.radius,           # keypoint radius  
-                thickness=self.pose_config.thickness,     # limb thickness
-                show=False)                               # show process
-            index += 1
-            # write video
-            videoWriter.write(vis_img)
+                final_result.append(result)
+                videoWriter_cut.write(img)
+                
+                vis_img = vis_pose_result(
+                    self.pose_model,                          # pose_model
+                    img,                                      # origin img
+                    pose_results,                             # person_results(bbox)
+                    dataset=self.dataset,                     # bbox_thr
+                    dataset_info=self.dataset_info,           # dataset_info
+                    kpt_score_thr=self.pose_config.kpt_thr,   # kpt_score_thr
+                    radius=self.pose_config.radius,           # keypoint radius  
+                    thickness=self.pose_config.thickness,     # limb thickness
+                    show=False)                               # show process
+                index += 1
+                # write video
+                videoWriter.write(vis_img)
+                pbar.update(1)
             
         # pdb.set_trace()
-        print('finish pose estimation')  
+        print('finish pose estimation:',conuter, ' frames.')  
         videoWriter.release()
+        videoWriter_cut.release()
         print('wrinting result to json')
         video_name = self.config['video_path'].split("/")[-1]
         # pdb.set_trace()
