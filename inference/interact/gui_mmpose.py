@@ -19,6 +19,9 @@ from tqdm import tqdm
 import os
 import cv2
 import sys
+import glob
+import re
+from PIL import Image
 # fix conflicts between qt5 and cv2
 os.environ.pop("QT_QPA_PLATFORM_PLUGIN_PATH")
 import json
@@ -27,7 +30,7 @@ import torch
 from queue import Queue
 from PyQt5.QtWidgets import (QWidget, QApplication, QComboBox, QCheckBox,
     QHBoxLayout, QLabel, QPushButton, QTextEdit, QFileDialog,
-    QPlainTextEdit, QVBoxLayout, QSizePolicy, QButtonGroup, QSlider, QShortcut, QRadioButton)
+    QPlainTextEdit, QVBoxLayout, QSizePolicy, QButtonGroup, QSlider, QShortcut, QRadioButton, QLineEdit)
 import pdb
 from PyQt5.QtGui import QPixmap, QKeySequence, QImage, QTextCursor, QIcon
 from PyQt5.QtCore import Qt, QTimer
@@ -61,23 +64,39 @@ from alphapose.utils.writer import DataWriter
 @jit(nopython=True)
 def get_bbox_from_mask(current_mask):
     
-    # print(current_mask.shape)
-    min_row = 2000
-    min_col = 2000
-    max_row = -1
-    max_col = -1
-    for row in range(0,len(current_mask)):  # num of row (h)
-        for col in range(0,len(current_mask[0])):  # num of col (w)
-            if (current_mask[row][col] == 1):
-                min_row = min(min_row,row)
-                min_col = min(min_col, col)
-                max_row = max(max_row,row)
-                max_col = max(max_col,col)
-    min_col = min_col - 5 if min_col - 5 > 0 else min_col 
-    min_row = min_row - 5 if min_row - 5 > 0 else min_row
+    # # print(current_mask.shape)
+    # min_row = 2000
+    # min_col = 2000
+    # max_row = -1
+    # max_col = -1
+    # for row in range(0,len(current_mask)):  # num of row (h)
+    #     for col in range(0,len(current_mask[0])):  # num of col (w)
+    #         if (current_mask[row][col] == 1):
+    #             min_row = min(min_row,row)
+    #             min_col = min(min_col, col)
+    #             max_row = max(max_row,row)
+    #             max_col = max(max_col,col)
+    # min_col = min_col - 5 if min_col - 5 > 0 else min_col 
+    # min_row = min_row - 5 if min_row - 5 > 0 else min_row
     
-    max_row = max_row + 5 if max_row + 5 < len(current_mask) else max_row
-    max_col = max_col + 5 if max_col + 5 < len(current_mask[0]) else max_col
+    # max_row = max_row + 5 if max_row + 5 < len(current_mask) else max_row
+    # max_col = max_col + 5 if max_col + 5 < len(current_mask[0]) else max_col
+    # np.where 函数返回所有满足条件的元素的索引
+    rows, cols = np.where(current_mask == 1)
+    
+    # 如果没有找到满足条件的元素，返回 None
+    if len(rows) == 0 or len(cols) == 0:
+        return None
+    
+    min_row, max_row = rows.min(), rows.max()
+    min_col, max_col = cols.min(), cols.max()
+    
+    # 为边界框增加一些填充
+    min_col = max(min_col - 5, 0)
+    min_row = max(min_row - 5, 0)
+    max_row = min(max_row + 5, current_mask.shape[0] - 1)
+    max_col = min(max_col + 5, current_mask.shape[1] - 1)
+    
     return min_col,min_row,max_col,max_row
 
 @jit(nopython=True)
@@ -305,6 +324,10 @@ class App(QWidget):  # net : XMem -> 表示net一定是XMem物件
                                                         'Number of prototypes', step=32, callback=self.update_config)
         self.mem_every_box, self.mem_every_box_layout = create_parameter_box(1, 100, 'Memory frame every (r)', 
                                                         callback=self.update_config)
+        self.pose_start = QLineEdit(self)
+        self.pose_start.setText('start frame pose estimation')
+        self.pose_end = QLineEdit(self)
+        self.pose_end.setText('end frame pose estimation')
 
         self.work_mem_min.setValue(self.processor.memory.min_mt_frames)
         self.work_mem_max.setValue(self.processor.memory.max_mt_frames)
@@ -317,6 +340,9 @@ class App(QWidget):  # net : XMem -> 表示net一定是XMem物件
         self.import_mask_button.clicked.connect(self.on_import_mask)
         self.import_layer_button = QPushButton('Import layer')
         self.import_layer_button.clicked.connect(self.on_import_layer)
+        self.import_loadmask_button = QPushButton('Load mask')
+        self.import_loadmask_button.clicked.connect(self.on_load_mask)
+        
 
         # Console on the GUI
         self.console = QPlainTextEdit()
@@ -392,12 +418,15 @@ class App(QWidget):  # net : XMem -> 表示net一定是XMem物件
         # import mask/layer
         import_area = QHBoxLayout()
         import_area.setAlignment(Qt.AlignTop)
+        import_area.addWidget(self.import_loadmask_button)
         import_area.addWidget(self.import_mask_button)
         import_area.addWidget(self.import_layer_button)
         minimap_area.addLayout(import_area)
 
         # console
         minimap_area.addWidget(self.console)
+        minimap_area.addWidget(self.pose_start)
+        minimap_area.addWidget(self.pose_end)
 
         draw_area.addLayout(minimap_area, 1)
 
@@ -534,8 +563,6 @@ class App(QWidget):  # net : XMem -> 表示net一定是XMem物件
             # pdb.set_trace()
             self.det_queue[self.cursur] = []
         # pdb.set_trace()
-         # 轉成bbox
-        (min_col,min_row,max_col,max_row) = get_bbox_from_mask(self.current_mask)
 
     def update_interact_vis(self):
         # Update the interactions without re-computing the overlay
@@ -726,7 +753,7 @@ class App(QWidget):  # net : XMem -> 表示net一定是XMem物件
         (min_col,min_row,max_col,max_row) = get_bbox_from_mask(self.current_mask)
         if len(self.det_queue[self.cursur]) > 1:
             self.det_queue[self.cursur] = []
-        self.det_queue[self.cursur].append(self.current_image)
+        # self.det_queue[self.cursur].append(self.current_image)
         self.det_queue[self.cursur].append(str(self.cursur) + '.jpg')
         self.det_queue[self.cursur].append(torch.from_numpy(np.array([[min_col,min_row,max_col,max_row]])))
         self.det_queue[self.cursur].append(torch.tensor([[1.]])) # bbox has no score , let it be a 100% accuracy
@@ -735,7 +762,7 @@ class App(QWidget):  # net : XMem -> 表示net一定是XMem物件
         self.det_queue[self.cursur].append(inps) #
         cropped_boxes = torch.zeros(torch.from_numpy(np.array([[min_col,min_row,max_col,max_row]])).size(0), 4)
         self.det_queue[self.cursur].append(cropped_boxes) # bbox has no ids 
-        self.det_queue[self.cursur].append(self.current_mask) # bbox has no ids 
+        # self.det_queue[self.cursur].append(self.current_mask) # bbox has no ids 
         
        # clear
         self.interacted_prob = None
@@ -762,7 +789,7 @@ class App(QWidget):  # net : XMem -> 表示net一定是XMem物件
             if len(self.det_queue[self.cursur]) > 1:
                 self.det_queue[self.cursur] = []
             # pdb.set_trace()
-            self.det_queue[self.cursur].append(self.current_image)
+            # self.det_queue[self.cursur].append(self.current_image)
             self.det_queue[self.cursur].append(str(self.cursur) + '.jpg')
             self.det_queue[self.cursur].append(torch.from_numpy(np.array([[min_col,min_row,max_col,max_row]])))
             self.det_queue[self.cursur].append(torch.tensor([[1.]])) # bbox has no score , let it be a 100% accuracy
@@ -771,7 +798,7 @@ class App(QWidget):  # net : XMem -> 表示net一定是XMem物件
             self.det_queue[self.cursur].append(inps) #
             cropped_boxes = torch.zeros(torch.from_numpy(np.array([[min_col,min_row,max_col,max_row]])).size(0), 4)
             self.det_queue[self.cursur].append(cropped_boxes) # bbox has no ids 
-            self.det_queue[self.cursur].append(self.current_mask) # bbox has no ids 
+            # self.det_queue[self.cursur].append(self.current_mask) # bbox has no ids 
 
             self.show_current_frame(fast=True) # 更新畫面
 
@@ -823,7 +850,7 @@ class App(QWidget):  # net : XMem -> 表示net一定是XMem物件
             self.det_queue[self.cursur].append(inps) #
             cropped_boxes = torch.zeros(torch.from_numpy(np.array([[min_col,min_row,max_col,max_row]])).size(0), 4)
             self.det_queue[self.cursur].append(cropped_boxes) 
-            self.det_queue[self.cursur].append(self.current_mask) 
+            # self.det_queue[self.cursur].append(self.current_mask) 
             
             self.timer.stop()
             self.play_button.setText('Play Video')
@@ -837,7 +864,7 @@ class App(QWidget):  # net : XMem -> 表示net一定是XMem物件
             # self.wait_and_put(self.det_queue, (orig_imgs[k], im_names[k], boxes_k, scores[dets[:, 0] == k], ids[dets[:, 0] == k], inps, cropped_boxes))
             if len(self.det_queue[self.cursur]) > 1:
                 self.det_queue[self.cursur] = []
-            self.det_queue[self.cursur].append(self.current_image)
+            # self.det_queue[self.cursur].append(self.current_image)
             self.det_queue[self.cursur].append(str(self.cursur) + '.jpg')
             self.det_queue[self.cursur].append(torch.from_numpy(np.array([[min_col,min_row,max_col,max_row]])))
             self.det_queue[self.cursur].append(torch.tensor([[1.]])) # bbox has no score , let it be a 100% accuracy
@@ -857,7 +884,7 @@ class App(QWidget):  # net : XMem -> 表示net一定是XMem物件
             self.timer.stop()
             self.play_button.setText('Play Video')
         else:
-            self.timer.start(1000 / 30)   # active timer to umplement on_play_video_timer
+            self.timer.start()   # active timer to umplement on_play_video_timer
             self.play_button.setText('Stop Video')
 
     def on_reset_mask(self):
@@ -1126,7 +1153,50 @@ class App(QWidget):  # net : XMem -> 表示net一定是XMem物件
             return
 
         self._try_load_layer(file_name)
-
+    
+    def on_load_mask(self):
+        # pdb.set_trace()
+        try:
+            start =  int(self.pose_start.text())
+            end = int(self.pose_end.text())
+        except:
+            pass
+        
+        
+        fnames = sorted(glob.glob(os.path.join(self.res_man.mask_dir, '*.jpg')))
+        if len(fnames) == 0:
+            fnames = sorted(glob.glob(os.path.join(self.res_man.mask_dir, '*.png')))
+        frame_list = []
+        t = time.time()
+        for i, fname in enumerate(fnames):
+            frame_list.append(np.array(Image.open(fname), dtype=np.uint8))
+        # pdb.set_trace()
+        
+        cursur = int(re.findall(r'\d+', fnames[0].split('/')[-1])[0])
+        
+        for k in frame_list:
+            
+            if cursur >= start and cursur <=end:
+                # pdb.set_trace()
+                (min_col,min_row,max_col,max_row) = get_bbox_from_mask(k)
+                # 將辨識完的結果 處理完後丟到 Queue 裡面
+                # self.wait_and_put(self.det_queue, (orig_imgs[k], im_names[k], boxes_k, scores[dets[:, 0] == k], ids[dets[:, 0] == k], inps, cropped_boxes))
+                if len(self.det_queue[cursur]) > 1:
+                    self.det_queue[cursur] = []
+                # self.det_queue[self.cursur].append(self.current_image)
+                self.det_queue[cursur].append(str(cursur) + '.jpg')
+                self.det_queue[cursur].append(torch.from_numpy(np.array([[min_col,min_row,max_col,max_row]])))
+                self.det_queue[cursur].append(torch.tensor([[1.]])) # bbox has no score , let it be a 100% accuracy
+                self.det_queue[cursur].append(torch.tensor([[0.]])) # bbox has no ids 
+                inps = torch.zeros(torch.from_numpy(np.array([[min_col,min_row,max_col,max_row]])).size(0), 3, *self._input_size)
+                self.det_queue[cursur].append(inps) #
+                cropped_boxes = torch.zeros(torch.from_numpy(np.array([[min_col,min_row,max_col,max_row]])).size(0), 4)
+                self.det_queue[cursur].append(cropped_boxes) 
+                # self.det_queue[cursur].append(self.current_mask) 
+            cursur += 1
+        
+        print('find_human_mask cost', time.time() - t)
+        
     def _try_load_layer(self, file_name):
         # file_name : ./docs/ECCV-logo.png
         try:
@@ -1157,7 +1227,9 @@ class App(QWidget):  # net : XMem -> 表示net一定是XMem物件
     
 
     def pose_estimate(self):
+        # pdb.set_trace()
         cap = cv2.VideoCapture(self.video_path)
+        fps = cap.get(cv2.CAP_PROP_FPS)
         output_layer_names = None
         fourcc = cv2.VideoWriter_fourcc(*'mp4v')
         # pdb.set_trace()
@@ -1167,10 +1239,12 @@ class App(QWidget):  # net : XMem -> 表示net一定是XMem物件
         if self.pose_config.size == -1:
             scale_factor = 1
         else:
-            scale_factor = cv2.CAP_PROP_FRAME_HEIGHT / self.pose_config
+            
+            scale_factor =  cap.get(cv2.CAP_PROP_FRAME_HEIGHT)/self.pose_config.size
+        # pdb.set_trace()
         for i in self.det_queue:                      # 將每個frame物件偵測的結果從 det_queue 取出。
             if len(i) != 0 :
-                i[2] = i[2]*scale_factor
+                i[1] = i[1]*scale_factor
                 det_data.append(i)
                 temp = i
 
@@ -1183,11 +1257,16 @@ class App(QWidget):  # net : XMem -> 表示net一定是XMem物件
         model = self.pose_config.pose_config.split('/')[-1]
         model_name = model.split("_")[0]
         
-        videoWriter = cv2.VideoWriter(os.path.join(self.pose_config.out_video_root,f'{model_name}_{os.path.basename(self.pose_config.video_path)}'),fourcc,self.fps, (w,h))
-        videoWriter_cut = cv2.VideoWriter(os.path.join(self.pose_config.out_video_root,f'vis_{os.path.basename(self.pose_config.video_path)}'),fourcc,self.fps, (w,h))
+        try:
+            videoWriter = cv2.VideoWriter(os.path.join(self.pose_config.out_video_root,f'{model_name}_{os.path.basename(self.pose_config.video_path)}'),fourcc,self.fps, (w,h))
+            videoWriter_cut = cv2.VideoWriter(os.path.join(self.pose_config.out_video_root,f'vis_{os.path.basename(self.pose_config.video_path)}'),fourcc,self.fps, (w,h))
+        except:
+            #" just incase"
+            videoWriter = cv2.VideoWriter(os.path.join(self.pose_config.out_video_root,f'{model_name}_{os.path.basename(self.pose_config.video_path)}'),fourcc,119.91444866920152, (w,h))
+            videoWriter_cut = cv2.VideoWriter(os.path.join(self.pose_config.out_video_root,f'vis_{os.path.basename(self.pose_config.video_path)}'),fourcc,119.91444866920152, (w,h))
 
-        start = int(det_data[0][1][0:-4])
-        end = int(det_data[-1][1][0:-4])
+        start = int(det_data[0][0][0:-4])
+        end = int(det_data[-1][0][0:-4])
         
         index = 0
         conuter = 0
@@ -1208,14 +1287,13 @@ class App(QWidget):  # net : XMem -> 表示net一定是XMem物件
                 pose_results, returned_outputs = inference_top_down_pose_model(
                     self.pose_model,                          # pose_model
                     img,                               # origin img
-                    det_data[conuter][2],                 # person_results(bbox)
+                    det_data[conuter][1],                 # person_results(bbox)
                     bbox_thr=self.pose_config.bbox_thr,       # bbox_thr
                     format='xyxy',
                     dataset=self.dataset,
                     dataset_info=self.dataset_info,           # dataset_info
                     return_heatmap=True,
                     outputs=output_layer_names)
-                
                 conuter += 1
     
                 # pdb.set_trace()
