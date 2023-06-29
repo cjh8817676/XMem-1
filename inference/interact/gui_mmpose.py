@@ -1156,12 +1156,6 @@ class App(QWidget):  # net : XMem -> 表示net一定是XMem物件
     
     def on_load_mask(self):
         # pdb.set_trace()
-        try:
-            start =  int(self.pose_start.text())
-            end = int(self.pose_end.text())
-        except:
-            pass
-        
         
         fnames = sorted(glob.glob(os.path.join(self.res_man.mask_dir, '*.jpg')))
         if len(fnames) == 0:
@@ -1170,6 +1164,16 @@ class App(QWidget):  # net : XMem -> 表示net一定是XMem物件
         t = time.time()
         for i, fname in enumerate(fnames):
             frame_list.append(np.array(Image.open(fname), dtype=np.uint8))
+            
+        try:
+            start =  int(self.pose_start.text())
+            end = int(self.pose_end.text())
+        except:
+            numbers = re.findall('\d+', fnames[0].split("/")[-1]) # 使用正規表達式找出所有的數字串
+            start =  int(numbers[0].lstrip('0')) # 去掉數字串的前置零並轉為整數
+            numbers = re.findall('\d+', fnames[-1].split("/")[-1]) # 使用正規表達式找出所有的數字串
+            end =  int(numbers[0].lstrip('0')) # 去掉數字串的前置零並轉為整數
+            
         # pdb.set_trace()
         
         cursur = int(re.findall(r'\d+', fnames[0].split('/')[-1])[0])
@@ -1257,13 +1261,16 @@ class App(QWidget):  # net : XMem -> 表示net一定是XMem物件
         model = self.pose_config.pose_config.split('/')[-1]
         model_name = model.split("_")[0]
         
-        try:
-            videoWriter = cv2.VideoWriter(os.path.join(self.pose_config.out_video_root,f'{model_name}_{os.path.basename(self.pose_config.video_path)}'),fourcc,self.fps, (w,h))
-            videoWriter_cut = cv2.VideoWriter(os.path.join(self.pose_config.out_video_root,f'vis_{os.path.basename(self.pose_config.video_path)}'),fourcc,self.fps, (w,h))
-        except:
+        # try: # if you can;t output video, try fps = 119.9144866820152 directly.
+        #     # pdb.set_trace()
+        #     print('origin_writer')
+        #     videoWriter = cv2.VideoWriter(os.path.join(self.pose_config.out_video_root,f'{model_name}_{os.path.basename(self.pose_config.video_path)}'),fourcc,self.fps, (w,h))
+        #     videoWriter_cut = cv2.VideoWriter(os.path.join(self.pose_config.out_video_root,f'vis_{os.path.basename(self.pose_config.video_path)}'),fourcc,self.fps, (w,h))
+        # except:
             #" just incase"
-            videoWriter = cv2.VideoWriter(os.path.join(self.pose_config.out_video_root,f'{model_name}_{os.path.basename(self.pose_config.video_path)}'),fourcc,119.91444866920152, (w,h))
-            videoWriter_cut = cv2.VideoWriter(os.path.join(self.pose_config.out_video_root,f'vis_{os.path.basename(self.pose_config.video_path)}'),fourcc,119.91444866920152, (w,h))
+        print('fixed_writer')
+        videoWriter = cv2.VideoWriter(os.path.join(self.pose_config.out_video_root,f'{model_name}_{os.path.basename(self.pose_config.video_path)}'),fourcc,119.91444866920152, (w,h))
+        videoWriter_cut = cv2.VideoWriter(os.path.join(self.pose_config.out_video_root,f'vis_{os.path.basename(self.pose_config.video_path)}'),fourcc,119.91444866920152, (w,h))
 
         start = int(det_data[0][0][0:-4])
         end = int(det_data[-1][0][0:-4])
